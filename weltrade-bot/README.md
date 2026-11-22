@@ -41,6 +41,24 @@ moyenne tous les N ticks. Le bot :
 - **par sécurité, ne trade pas** si les données montrent des pics haussiers,
   c'est-à-dire si l'indice ne se comporte pas comme un GainX.
 
+## Unité de temps par indice
+
+L'unité de temps de chaque indice se règle dans le groupe
+**« Unite de temps par indice »** des paramètres de l'EA, sans toucher au code :
+
+| Paramètre | Indice | Par défaut |
+|---|---|---|
+| `InpTF_FXVol20` / `InpTF_SFXVol20` | FX / SFX Vol 20 | **H1** |
+| `InpTF_FXVol40` / `InpTF_SFXVol40` | FX / SFX Vol 40 | **M15** |
+| `InpTF_FXVol60` / `InpTF_SFXVol60` | FX / SFX Vol 60 | **M15** |
+| `InpTF_GainX` | GainX | **M1** (l'EA affiche un avertissement au-delà de M5) |
+
+Le bot calcule ses signaux dans cette unité de temps, quel que soit le
+graphique sur lequel il est posé. Pour comparer M15 et H1 sur un indice,
+lancez-le deux fois dans le testeur MT5 avec chaque valeur. Avec le
+backtester Python, exportez les barres dans chaque unité de temps et lancez
+le script sur chaque fichier.
+
 ## Préréglages par indice
 
 Chaque indice a son propre jeu de paramètres, chargé automatiquement
@@ -51,12 +69,12 @@ Chaque indice a son propre jeu de paramètres, chargé automatiquement
 
 | Indice | UT | Risque | EMA rapide / lente | ADX min | Stop | Objectif | Trailing |
 |---|---|---|---|---|---|---|---|
-| FX Vol 20  | M15 | ×1,0 | 20 / 100 | 20 | 2,0 ATR | 4,0 ATR | 2,5 ATR |
-| FX Vol 40  | M5  | ×1,0 | 20 / 100 | 22 | 2,2 ATR | 4,0 ATR | 2,5 ATR |
-| FX Vol 60  | M5  | ×0,8 | 30 / 150 | 25 | 2,5 ATR | 4,5 ATR | 3,0 ATR |
-| SFX Vol 20 | M15 | ×1,0 | 20 / 120 | 22 | 2,2 ATR | 4,0 ATR | 2,8 ATR |
-| SFX Vol 40 | M5  | ×0,8 | 25 / 150 | 25 | 2,5 ATR | 4,5 ATR | 3,0 ATR |
-| SFX Vol 60 | M5  | ×0,6 | 30 / 200 | 28 | 3,0 ATR | 5,0 ATR | 3,5 ATR |
+| FX Vol 20  | H1  | ×1,0 | 20 / 100 | 20 | 2,0 ATR | 4,0 ATR | 2,5 ATR |
+| FX Vol 40  | M15 | ×1,0 | 20 / 100 | 22 | 2,2 ATR | 4,0 ATR | 2,5 ATR |
+| FX Vol 60  | M15 | ×0,8 | 30 / 150 | 25 | 2,5 ATR | 4,5 ATR | 3,0 ATR |
+| SFX Vol 20 | H1  | ×1,0 | 20 / 120 | 22 | 2,2 ATR | 4,0 ATR | 2,8 ATR |
+| SFX Vol 40 | M15 | ×0,8 | 25 / 150 | 25 | 2,5 ATR | 4,5 ATR | 3,0 ATR |
+| SFX Vol 60 | M15 | ×0,6 | 30 / 200 | 28 | 3,0 ATR | 5,0 ATR | 3,5 ATR |
 
 **GainX (DRIFT, en M1)**
 
@@ -75,7 +93,10 @@ La logique de ces réglages :
   longues, ADX plus élevé), plus les stops sont larges et plus le risque par
   trade est réduit.
 - **Les indices à 20** bougent peu : le spread pèse plus lourd par rapport au
-  mouvement. On travaille donc en M15 pour viser des mouvements plus grands.
+  mouvement. Ils travaillent donc en H1, où le spread coûte environ 2,5 fois
+  moins par trade qu'en M15, mais avec environ 4 fois moins de trades.
+- **Les indices à 40 et 60** travaillent en M15. Le M5 coûtait nettement plus
+  cher en spread pour un avantage incertain.
 - **Les GainX à pics fréquents** (400) imposent des positions plus courtes et
   un risque plus faible. Les GainX à pics rares (1200) laissent plus de temps
   à la dérive.
@@ -111,7 +132,7 @@ La logique de ces réglages :
    reproduit correctement les pics qui sautent par-dessus le stop.
 2. **Backtester Python** sur les vraies données Weltrade :
    - Ouvrez un graphique de l'indice **dans l'UT de son préréglage** (M1 pour
-     GainX, M5 ou M15 pour FX/SFX Vol) et faites défiler l'historique.
+     GainX, H1 pour les indices 20, M15 pour les 40 et 60) et faites défiler l'historique.
    - Lancez le script `ExportBars` : le CSV est écrit dans `MQL5/Files/`.
    - Puis :
 

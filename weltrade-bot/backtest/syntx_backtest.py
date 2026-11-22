@@ -354,15 +354,18 @@ def fmt(st: dict) -> str:
 # --------------------------------------------------------------------------
 # Seuls ces indices sont autorises ; les autres sont juges trop volatils.
 # Ces valeurs sont des POINTS DE DEPART a valider avec --optimize.
+# "tf" = unite de temps par defaut (modifiable dans l'EA : groupe
+# "Unite de temps par indice"). Pour tester une autre UT, exportez les
+# barres dans cette UT : le backtester travaille sur l'UT du fichier.
 _T = "trend"
 PRESETS: dict[tuple[str, int], dict] = {
-    #                 UT     risque  fast slow  ADX   SL   TP   trail
-    ("FXVOL", 20):  dict(engine=_T, tf="M15", risk_mult=1.0, fast=20, slow=100, adx_min=20, sl_atr=2.0, tp_atr=4.0, trail_atr=2.5),
-    ("FXVOL", 40):  dict(engine=_T, tf="M5",  risk_mult=1.0, fast=20, slow=100, adx_min=22, sl_atr=2.2, tp_atr=4.0, trail_atr=2.5),
-    ("FXVOL", 60):  dict(engine=_T, tf="M5",  risk_mult=0.8, fast=30, slow=150, adx_min=25, sl_atr=2.5, tp_atr=4.5, trail_atr=3.0),
-    ("SFXVOL", 20): dict(engine=_T, tf="M15", risk_mult=1.0, fast=20, slow=120, adx_min=22, sl_atr=2.2, tp_atr=4.0, trail_atr=2.8),
-    ("SFXVOL", 40): dict(engine=_T, tf="M5",  risk_mult=0.8, fast=25, slow=150, adx_min=25, sl_atr=2.5, tp_atr=4.5, trail_atr=3.0),
-    ("SFXVOL", 60): dict(engine=_T, tf="M5",  risk_mult=0.6, fast=30, slow=200, adx_min=28, sl_atr=3.0, tp_atr=5.0, trail_atr=3.5),
+    #                 UT par defaut, risque, fast, slow, ADX, SL, TP, trail
+    ("FXVOL", 20):  dict(engine=_T, tf="H1",  risk_mult=1.0, fast=20, slow=100, adx_min=20, sl_atr=2.0, tp_atr=4.0, trail_atr=2.5),
+    ("FXVOL", 40):  dict(engine=_T, tf="M15", risk_mult=1.0, fast=20, slow=100, adx_min=22, sl_atr=2.2, tp_atr=4.0, trail_atr=2.5),
+    ("FXVOL", 60):  dict(engine=_T, tf="M15", risk_mult=0.8, fast=30, slow=150, adx_min=25, sl_atr=2.5, tp_atr=4.5, trail_atr=3.0),
+    ("SFXVOL", 20): dict(engine=_T, tf="H1",  risk_mult=1.0, fast=20, slow=120, adx_min=22, sl_atr=2.2, tp_atr=4.0, trail_atr=2.8),
+    ("SFXVOL", 40): dict(engine=_T, tf="M15", risk_mult=0.8, fast=25, slow=150, adx_min=25, sl_atr=2.5, tp_atr=4.5, trail_atr=3.0),
+    ("SFXVOL", 60): dict(engine=_T, tf="M15", risk_mult=0.6, fast=30, slow=200, adx_min=28, sl_atr=3.0, tp_atr=5.0, trail_atr=3.5),
 }
 _GAINX = {  # niveau: (risque, lookback, EMA, cooldown, SL pic, TP pic, barres max)
     400:  (0.7, 2000, 30, 2, 1.3, 0.5, 30),

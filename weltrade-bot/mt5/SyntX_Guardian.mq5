@@ -9,7 +9,9 @@
 //|                                                                  |
 //|  Chaque indice a son propre jeu de parametres (preset) :         |
 //|  unite de temps, periodes, filtres, stops et risque adaptes a    |
-//|  sa volatilite. Les presets sont des POINTS DE DEPART a valider  |
+//|  sa volatilite. L'unite de temps de chaque indice est reglable   |
+//|  dans le groupe "Unite de temps par indice".                     |
+//|  Les presets sont des POINTS DE DEPART a valider                 |
 //|  avec le backtester (--optimize), pas des reglages garantis.     |
 //|                                                                  |
 //|  Gestion du risque : % du capital par trade, limite de perte     |
@@ -19,7 +21,7 @@
 //|  Aucun resultat n'est garanti. Testez sur compte demo.          |
 //+------------------------------------------------------------------+
 #property copyright "SyntX Guardian"
-#property version   "1.10"
+#property version   "1.20"
 
 #include <Trade\Trade.mqh>
 
@@ -50,6 +52,16 @@ input double InpRiskPercent      = 0.5;   // Risque de base par trade (% equity)
 input double InpDailyLossPercent = 3.0;   // Perte max journaliere (%) -> stop jusqu'a demain
 input double InpMaxDDPercent     = 15.0;  // Drawdown max depuis le pic (%) -> arret total
 input int    InpMaxTradesPerDay  = 20;    // Nombre max de trades par jour
+
+//--- Unite de temps par indice (utilisee avec les presets)
+input group "=== Unite de temps par indice ==="
+input ENUM_TIMEFRAMES InpTF_FXVol20  = PERIOD_H1;   // FX Vol 20
+input ENUM_TIMEFRAMES InpTF_FXVol40  = PERIOD_M15;  // FX Vol 40
+input ENUM_TIMEFRAMES InpTF_FXVol60  = PERIOD_M15;  // FX Vol 60
+input ENUM_TIMEFRAMES InpTF_SFXVol20 = PERIOD_H1;   // SFX Vol 20
+input ENUM_TIMEFRAMES InpTF_SFXVol40 = PERIOD_M15;  // SFX Vol 40
+input ENUM_TIMEFRAMES InpTF_SFXVol60 = PERIOD_M15;  // SFX Vol 60
+input ENUM_TIMEFRAMES InpTF_GainX    = PERIOD_M1;   // GainX (M1 fortement conseille)
 
 //--- Parametres manuels (utilises seulement si InpUsePresets = false)
 input group "=== Manuel : General ==="
@@ -180,7 +192,7 @@ void SetTrend(string name, ENUM_TIMEFRAMES tf, double riskMult, int fast, int sl
 void SetDrift(string name, double riskMult, int lookback, int ema, int cooldown,
               double slSpike, double tpSpike, int maxBars)
   {
-   P.name = name; P.engine = ENGINE_DRIFT; P.tf = PERIOD_M1; P.riskMult = riskMult;
+   P.name = name; P.engine = ENGINE_DRIFT; P.tf = InpTF_GainX; P.riskMult = riskMult;
    P.expectedDrift = 1;   // GainX : derive haussiere, pics baissiers
    P.lookback = lookback; P.spikeMult = 6.0; P.minSpikes = 5; P.driftEMA = ema;
    P.cooldown = cooldown; P.slSpike = slSpike; P.tpSpike = tpSpike; P.maxBars = maxBars;
@@ -190,16 +202,16 @@ bool LoadPreset(ENUM_FAMILY fam, int level)
   {
    switch(fam)
      {
-      //                  nom          TF          risque fast slow ADX  SL   TP   trail
+      //                  nom          UT (input)      risque fast slow ADX  SL   TP   trail
       case FAMILY_FXVOL:
-         if(level == 20) { SetTrend("FX Vol 20",  PERIOD_M15, 1.0, 20, 100, 20, 2.0, 4.0, 2.5); return true; }
-         if(level == 40) { SetTrend("FX Vol 40",  PERIOD_M5,  1.0, 20, 100, 22, 2.2, 4.0, 2.5); return true; }
-         if(level == 60) { SetTrend("FX Vol 60",  PERIOD_M5,  0.8, 30, 150, 25, 2.5, 4.5, 3.0); return true; }
+         if(level == 20) { SetTrend("FX Vol 20",  InpTF_FXVol20,  1.0, 20, 100, 20, 2.0, 4.0, 2.5); return true; }
+         if(level == 40) { SetTrend("FX Vol 40",  InpTF_FXVol40,  1.0, 20, 100, 22, 2.2, 4.0, 2.5); return true; }
+         if(level == 60) { SetTrend("FX Vol 60",  InpTF_FXVol60,  0.8, 30, 150, 25, 2.5, 4.5, 3.0); return true; }
          return false;
       case FAMILY_SFX:
-         if(level == 20) { SetTrend("SFX Vol 20", PERIOD_M15, 1.0, 20, 120, 22, 2.2, 4.0, 2.8); return true; }
-         if(level == 40) { SetTrend("SFX Vol 40", PERIOD_M5,  0.8, 25, 150, 25, 2.5, 4.5, 3.0); return true; }
-         if(level == 60) { SetTrend("SFX Vol 60", PERIOD_M5,  0.6, 30, 200, 28, 3.0, 5.0, 3.5); return true; }
+         if(level == 20) { SetTrend("SFX Vol 20", InpTF_SFXVol20, 1.0, 20, 120, 22, 2.2, 4.0, 2.8); return true; }
+         if(level == 40) { SetTrend("SFX Vol 40", InpTF_SFXVol40, 0.8, 25, 150, 25, 2.5, 4.5, 3.0); return true; }
+         if(level == 60) { SetTrend("SFX Vol 60", InpTF_SFXVol60, 0.6, 30, 200, 28, 3.0, 5.0, 3.5); return true; }
          return false;
       case FAMILY_GAINX:
         {
@@ -256,6 +268,10 @@ int OnInit()
 
    if(InpUsePresets && allowed) LoadPreset(fam, level);
    else                         LoadManual();
+
+   if(P.engine == ENGINE_DRIFT && PeriodSeconds(P.tf) > PeriodSeconds(PERIOD_M5))
+      PrintFormat("ATTENTION : GainX en %s. Les pics durent quelques secondes : "
+                  "au-dela de M5 ils sont noyes dans la barre. M1 conseille.", EnumToString(P.tf));
 
    if(P.engine == ENGINE_DRIFT)
      {
