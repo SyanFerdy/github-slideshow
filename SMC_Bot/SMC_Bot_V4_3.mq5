@@ -789,8 +789,11 @@ private:
    datetime        m_failTime[];
 
 public:
+   CSmcBot() { m_count = 0; m_lastCleanup = 0; m_gvPrefix = ""; }
+
    bool Init()
    {
+      m_count = 0;
       if(!ValidateInputs()) return false;
 
       m_trade.SetExpertMagicNumber(InpMagicNumber);
@@ -897,6 +900,11 @@ private:
       if(InpUseRLock && InpRLockLevelR >= InpRLockThreshold)             return Fail("gain verrouillé doit être < seuil de lock");
       if(InpBEOffsetR >= InpBETriggerR)                                  return Fail("offset BE doit être < déclenchement BE");
       if(InpOrderRetries < 1 || InpMaxQuoteAgeSec < 10)                  return Fail("retries / âge de cotation");
+      if(InpSlippage < 0 || InpNewsMinutesBefore < 0 || InpNewsMinutesAfter < 0) return Fail("slippage / minutes de news négatifs");
+      if(InpMaxTotalRisk > 100 || InpMaxDrawdown > 100 || InpMaxDailyLoss > 100)  return Fail("pourcentage > 100");
+      if(InpUseRoomFilter && InpMinRoomR <= 0)                           return Fail("place minimale (R) <= 0");
+      if(InpFX_SLBufferATR < 0 || InpGOLD_SLBufferATR < 0 || InpIDX_SLBufferATR < 0 || InpCRY_SLBufferATR < 0) return Fail("marge SL négative");
+      if(InpFX_MaxSpreadPct <= 0 || InpGOLD_MaxSpreadPct <= 0 || InpIDX_MaxSpreadPct <= 0 || InpCRY_MaxSpreadPct <= 0) return Fail("spread max <= 0");
       return true;
    }
 
