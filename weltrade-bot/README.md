@@ -1,4 +1,4 @@
-# SyntX Guardian v2 — bot MT5 pour les indices synthétiques Weltrade
+# SyntX Guardian v2.1 — bot MT5 pour les indices synthétiques Weltrade
 
 > ⚠️ **À lire avant tout.** Les indices synthétiques Weltrade sont générés par un
 > algorithme du broker, qui est aussi votre contrepartie. Aucun bot ne peut
@@ -10,12 +10,52 @@
 
 | Fichier | Rôle |
 |---|---|
-| `mt5/SyntX_Guardian.mq5` | Expert Advisor MetaTrader 5 (4 stratégies, gestion du risque partagée et persistante, journal des trades) |
-| `mt5/ExportBars.mq5` | Script qui exporte l'historique d'un graphique en CSV |
-| `backtest/syntx_backtest.py` | Backtester : comparaison des stratégies, optimisation, validation hors échantillon, verdict automatique |
+| `mt5/SyntX_Guardian.mq5` | Expert Advisor MetaTrader 5 (4 stratégies, réglages par indice, gestion du risque partagée et persistante, journal) |
+| `mt5/ExportBars.mq5` | Script : exporte en une fois tous les indices autorisés et leurs caractéristiques réelles |
+| `backtest/calibrate.py` | **Calibration** : choisit, pour chaque indice, l'unité de temps, la stratégie et les réglages sur vos données, et désactive les indices sans avantage |
+| `backtest/syntx_backtest.py` | Backtester : comparaison des stratégies, optimisation, verdict automatique |
 | `backtest/analyze_trades.py` | Analyse du journal de trades de l'EA (phase démo puis réel) |
+| `backtest/test_syntx.py` | Tests automatiques (cohérence EA/Python, absence de triche sur le futur, etc.) |
 
-## Nouveautés de la v2
+## Nouveautés de la v2.1
+
+**Rentabilité.** Le seul levier qui ne soit pas un pari : ne trader que ce
+qui a fait ses preuves, avec les réglages propres à chaque indice.
+
+- **Calibration par indice** (`calibrate.py`) : pour chaque indice, le
+  meilleur couple unité de temps × stratégie × réglages est choisi sur le
+  début de l'historique. Il est ensuite testé **une seule fois** sur la fin,
+  jamais vue. L'indice est activé seulement s'il passe tous les seuils.
+- **Les caractéristiques réelles de chaque indice** (spread, swap, distances
+  minimales, lots) sont exportées depuis MT5 et prises en compte dans les tests.
+- **Le backtest reproduit maintenant exactement l'EA** :
+  - ADX de Wilder des deux côtés ; ATR en moyenne simple, comme MT5 ;
+  - trailing stop une fois par barre ;
+  - swap à chaque nuit ;
+  - même filtre de spread.
+
+  Un réglage validé en backtest est donc bien celui que l'EA appliquera.
+
+**Robustesse.**
+
+- **État de risque propre à chaque compte.** Un compte démo et un compte
+  réel sur le même terminal ne partagent plus le coupe-circuit.
+- **Dépôts et retraits pris en compte** : un retrait ne déclenche plus le
+  coupe-circuit.
+- **Contrôles avant chaque ordre** :
+  - mode de trading du symbole (fermé, achat seul…) ;
+  - distances minimales et niveau de gel du broker ;
+  - marge disponible ;
+  - lot maximal ;
+  - code retour de chaque ordre.
+- **Une fermeture qui échoue est retentée à chaque tick.**
+- **Données pas prêtes = signal pas perdu** : la barre n'est traitée qu'une
+  fois les indicateurs disponibles.
+- **Paramètres vérifiés au démarrage** ; interrupteur d'activation par indice.
+- **Tests automatiques** : les préréglages de l'EA et du backtester ne
+  peuvent plus diverger sans que les tests échouent.
+
+## Nouveautés de la v2.0
 
 | Défaut de la v1 | Correction |
 |---|---|
@@ -53,7 +93,17 @@ haussiers, c'est-à-dire si l'indice ne se comporte pas comme un GainX.
 
 ## Réglages par indice
 
-Tout se règle dans les paramètres de l'EA, sans toucher au code.
+Tout se règle sans toucher au code. Pour chaque indice, l'EA applique, par
+ordre de priorité :
+
+1. **le fichier de calibration** `SyntX_Guardian_presets.csv` (dossier commun
+   de MT5), produit par `calibrate.py`. Un indice qui y est marqué désactivé
+   ne trade pas ;
+2. **les entrées** « Unite de temps par indice » et « Strategie par indice » ;
+3. **les préréglages intégrés** ci-dessous.
+
+Les interrupteurs du groupe « Activation par indice » permettent aussi de
+couper un indice à la main.
 
 **Unité de temps** (groupe « Unite de temps par indice ») :
 H1 pour les indices 20, M15 pour les 40 et 60, M1 pour GainX. L'EA affiche un
@@ -92,8 +142,8 @@ pour les 6 indices FX/SFX. Choisissez-la d'après les résultats de
 
 ## Gestion du risque
 
-Ces protections sont partagées entre **tous les graphiques qui ont le même
-numéro magique** (laissez `InpMagic` identique partout) et **conservées après
+Ces protections sont partagées entre **tous les graphiques du même compte qui
+ont le même numéro magique** (laissez `InpMagic` identique partout) et **conservées après
 un redémarrage** de MT5 :
 
 | Protection | Défaut | Effet |
@@ -108,8 +158,12 @@ un redémarrage** de MT5 :
 - **Rien n'est jamais augmenté après une perte** : ni martingale, ni grille.
 - **Le coupe-circuit ne se réarme qu'à la main.** Analysez d'abord les
   résultats, puis passez `InpResetHalt = true` une fois, et remettez-le à
-  `false`. Faites de même après un retrait d'argent, qui ferait sinon
-  ressembler le compte à une perte.
+  `false`. Les dépôts et retraits sont pris en compte automatiquement.
+- **L'état est propre à chaque compte** (numéro de compte + numéro magique) :
+  démo et réel sur le même terminal ne se mélangent pas.
+- **Contrôles avant chaque ordre** : marge (un trade n'utilise pas plus de
+  50 % de la marge libre), distances minimales du broker, mode de trading du
+  symbole, lot maximal.
 - **Le bot mesure l'equity de tout le compte.** Utilisez un compte dédié,
   sans trades manuels ni autres robots.
 
@@ -119,49 +173,66 @@ un redémarrage** de MT5 :
 
 1. Dans MT5 : *Fichier → Ouvrir le dossier des données → MQL5*.
 2. Copiez `SyntX_Guardian.mq5` dans `Experts/` et `ExportBars.mq5` dans `Scripts/`.
-3. Compilez les deux fichiers dans MetaEditor (F7).
-4. Posez l'EA sur un graphique par indice, avec le même numéro magique partout.
+3. Compilez les deux fichiers dans MetaEditor (F7). **S'il y a des erreurs de
+   compilation, copiez-les-moi** : le code n'a pas pu être compilé ici.
+4. *Outils → Options → Graphiques → Barres max. dans le graphique* : **Illimité**,
+   sinon l'historique exporté est tronqué.
 
-### 2. Valider chaque indice (obligatoire)
+### 2. Exporter les données (une seule fois)
 
-1. **Exportez l'historique.** Ouvrez un graphique de l'indice dans son unité
-   de temps, faites défiler pour charger l'historique (1 an minimum, 2-3 ans
-   pour H1), puis lancez `ExportBars`. Le CSV est écrit dans `MQL5/Files/`.
-2. **Comparez les stratégies.** Pour FX/SFX Vol :
+Lancez le script `ExportBars` sur n'importe quel graphique. Il exporte tous les
+indices autorisés (GainX en M1 ; FX/SFX Vol en M15 et H1) et leurs
+caractéristiques réelles dans *Dossier commun → Files → SyntX_data*.
+(Dossier commun : *Fichier → Ouvrir le dossier des données*, remonter d'un
+niveau, puis *Common*.)
 
-   ```bash
-   pip install pandas numpy
-   python backtest/syntx_backtest.py FX_Vol_40_M15.csv --point 0.01 --compare
-   ```
+### 3. Calibrer
 
-   Pour GainX : `python backtest/syntx_backtest.py GainX_999_M1.csv --point 0.01`
+```bash
+pip install pandas numpy
+python backtest/calibrate.py "<Dossier commun>/Files/SyntX_data"
+```
 
-   `--point` correspond à la taille du point affichée par `ExportBars`.
-   Il sert à convertir le spread réel en prix.
-3. **Optimisez la meilleure stratégie et vérifiez-la sur des données jamais vues :**
+Pour chaque indice, le script affiche :
+- les essais sur la période d'apprentissage ;
+- le choix retenu ;
+- le résultat sur la période jamais vue ;
+- la décision **ACTIVE** ou **DESACTIVE**.
 
-   ```bash
-   python backtest/syntx_backtest.py FX_Vol_40_M15.csv --point 0.01 --strategy breakout --optimize
-   ```
+Il écrit `SyntX_Guardian_presets.csv` : copiez-le dans *Dossier commun → Files*.
+Un indice sans données ou sans avantage validé est désactivé.
 
-   Seul un réglage marqué **VALIDE hors échantillon** est conservé. Les
-   indices qui échouent sont retirés : mieux vaut 2 indices rentables que
-   7 perdants.
-4. **Confirmez dans le testeur MT5** (Ctrl+R) en mode **« Chaque tick basé sur
-   des ticks réels »**.
+Pour explorer un indice à la main :
 
-### 3. Compte démo (3 mois minimum), puis petit compte réel (3 mois)
+```bash
+python backtest/syntx_backtest.py FX_Vol_40_M15.csv --point 0.01 --compare
+python backtest/syntx_backtest.py FX_Vol_40_M15.csv --point 0.01 --strategy breakout --optimize
+```
 
-Le journal se trouve dans le dossier commun de MT5 :
-*Fichier → Ouvrir le dossier des données → remonter d'un niveau → Common → Files →
+### 4. Confirmer dans le testeur MT5
+
+Mode **« Chaque tick basé sur des ticks réels »**, sur la période jamais vue
+(les 30 % les plus récents de l'historique), avec le fichier de calibration en
+place. Les résultats doivent être proches de ceux de `calibrate.py`.
+
+### 5. Compte démo (3 mois minimum), puis petit compte réel (3 mois)
+
+Posez l'EA sur un graphique par indice **activé**, avec le même numéro magique
+partout. Le journal est écrit dans *Dossier commun → Files →
 `SyntX_Guardian_trades.csv`*.
 
 ```bash
 python backtest/analyze_trades.py SyntX_Guardian_trades.csv --expected "FX Vol 40=0.15"
 ```
 
-Le script vérifie les mêmes seuils que le backtester, et l'écart avec le gain
-moyen attendu (au plus ±30 %).
+Indiquez dans `--expected` le gain moyen « E test » donné par `calibrate.py`.
+L'écart doit rester dans ±30 %.
+
+### Tests automatiques
+
+```bash
+cd backtest && python -m pytest test_syntx.py -q
+```
 
 ## Les seuils de validation
 
@@ -176,6 +247,11 @@ données jamais vues, puis en démo :
 | Profit factor (gains totaux / pertes totales) | > 1,3 |
 | Perte maximale depuis un plus haut | < 15 % |
 | Stabilité | gagnant sur au moins 3 des 4 périodes successives |
+
+**Un seul test final par indice.** La calibration choisit le réglage sur
+l'apprentissage, puis teste **ce seul réglage** sur la période jamais vue.
+Tester plusieurs réglages sur cette période et garder le meilleur
+reviendrait à tricher : le hasard finirait par en faire passer un.
 
 **Pourquoi t > 2,5 et pas 2.** On teste jusqu'à 27 combinaisons indice ×
 stratégie. Avec t > 2, environ une sur 40 « passe » par pur hasard. Lors des

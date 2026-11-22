@@ -31,6 +31,9 @@ Modele d'execution (neutre, sans biais volontaire) :
     d'ouverture (dans les deux sens) ;
   - stop et objectif touches dans la meme barre -> le plus proche de
     l'ouverture est suppose touche en premier ;
+  - trade ignore si le spread depasse 10 % du stop (comme l'EA) ;
+  - swap applique a chaque nuit passee en position (--swap-long/--swap-short) ;
+  - indicateurs calcules comme MT5 (ATR = moyenne simple, ADX de Wilder) ;
   - DRIFT : quand un pic traverse le stop, le depassement est perdu
     (--spike-slippage, 1.0 = realiste) car un pic saute en un seul tick.
 Limite : le plafond de risque total et la limite journaliere de l'EA
@@ -142,19 +145,24 @@ def ema(s: pd.Series, n: int) -> pd.Series:
     return s.ewm(span=n, adjust=False).mean()
 
 
-def atr(df: pd.DataFrame, n: int) -> pd.Series:
+def true_range(df: pd.DataFrame) -> pd.Series:
     pc = df["close"].shift()
-    tr = pd.concat([df["high"] - df["low"], (df["high"] - pc).abs(), (df["low"] - pc).abs()],
-                   axis=1).max(axis=1)
-    return tr.ewm(alpha=1 / n, adjust=False).mean()
+    return pd.concat([df["high"] - df["low"], (df["high"] - pc).abs(), (df["low"] - pc).abs()],
+                     axis=1).max(axis=1)
+
+
+def atr(df: pd.DataFrame, n: int) -> pd.Series:
+    """Comme iATR de MT5 : moyenne SIMPLE du true range."""
+    return true_range(df).rolling(n, min_periods=1).mean()
 
 
 def adx(df: pd.DataFrame, n: int) -> pd.Series:
+    """Comme iADXWilder de MT5 (lissage de Wilder). L'EA utilise iADXWilder."""
     up = df["high"].diff()
     dn = -df["low"].diff()
     plus_dm = np.where((up > dn) & (up > 0), up, 0.0)
     minus_dm = np.where((dn > up) & (dn > 0), dn, 0.0)
-    a = atr(df, n)
+    a = true_range(df).ewm(alpha=1 / n, adjust=False).mean()
     pdi = 100 * pd.Series(plus_dm, index=df.index).ewm(alpha=1 / n, adjust=False).mean() / a
     mdi = 100 * pd.Series(minus_dm, index=df.index).ewm(alpha=1 / n, adjust=False).mean() / a
     dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)
@@ -226,6 +234,9 @@ class Params:
     strategy: str = "ema_cross"
     spread: float = 0.0
     spike_slippage: float = 1.0
+    max_spread_sl_ratio: float = 0.10  # comme l'EA : trade ignore si spread > 10 % du stop
+    swap_long: float = 0.0             # swap par nuit en unites de prix (+ = credit)
+    swap_short: float = 0.0
     expected_drift: int = 0          # +1 pour GainX (securite)
     max_bars: int = 0                # sortie temporelle (drift, meanrev)
     # drift
@@ -308,6 +319,53 @@ def detect_tf(name: str) -> str | None:
     return m.group(1) if m else None
 
 
+# Fichier de calibration partage avec l'EA (Common\\Files\\SyntX_Guardian_presets.csv) :
+# une ligne par reglage : indice,cle,valeur  (ex. "FX Vol 40,sl_atr,2.5")
+OVERRIDE_KEYS = ("enabled", "tf", "strategy", "risk_mult", "fast", "slow", "adx_min", "sl_atr", "tp_atr",
+                 "trail_atr", "brk_period", "bb_dev", "rsi_low", "adx_max_mr", "mr_sl_atr", "max_bars",
+                 "lookback", "drift_ema", "cooldown", "sl_spike", "tp_spike", "spike_mult", "min_spikes")
+PRESET_FILE = "SyntX_Guardian_presets.csv"
+
+
+def load_overrides(path: str) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    with open(path, encoding="utf-8-sig") as fh:
+        for line in fh:
+            parts = [x.strip() for x in line.split(",")]
+            if len(parts) != 3 or parts[0].startswith("#") or parts[0].lower() == "index":
+                continue
+            name, key, val = parts
+            if key not in OVERRIDE_KEYS:
+                raise ValueError(f"cle inconnue dans {path} : {key}")
+            out.setdefault(name.lower(), {})[key] = val
+    return out
+
+
+def apply_overrides(preset: dict, overrides: dict[str, str]) -> dict:
+    """Applique les valeurs calibrees sur un preset (types convertis)."""
+    d = dict(preset)
+    types = {f: type(v) for f, v in Params().__dict__.items()}
+    for k, v in overrides.items():
+        if k == "enabled":
+            continue
+        if k in ("tf", "strategy"):
+            d[k] = v
+        elif k == "risk_mult":
+            d[k] = float(v)
+        else:
+            d[k] = types[k](float(v)) if types[k] is int else types[k](v)
+    return d
+
+
+def write_overrides(path: str, rows: list[tuple[str, str, object]]) -> None:
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("index,key,value\n")
+        for name, key, val in rows:
+            if key not in OVERRIDE_KEYS:
+                raise ValueError(key)
+            fh.write(f"{name},{key},{val}\n")
+
+
 def apply_preset(preset: dict | None, strategy: str | None, base: Params) -> tuple[Params, float, str | None]:
     """Retourne (parametres, multiplicateur de risque, UT conseillee)."""
     tf, risk_mult, p = None, 1.0, base
@@ -334,6 +392,7 @@ def apply_preset(preset: dict | None, strategy: str | None, base: Params) -> tup
 @dataclass
 class Result:
     trades_r: list = field(default_factory=list)   # resultat de chaque trade, en R
+    trades: list = field(default_factory=list)     # (barre d'entree, barre de sortie, sens, R)
 
     def stats(self, risk_pct: float) -> dict:
         return stats_from_r(np.array(self.trades_r, dtype=float), risk_pct)
@@ -360,6 +419,10 @@ def stats_from_r(r: np.ndarray, risk_pct: float) -> dict:
 
 def _prepare(df: pd.DataFrame, p: Params) -> dict:
     out = {k: df[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close")}
+    if pd.api.types.is_datetime64_any_dtype(df["time"]):
+        out["day"] = (df["time"].dt.normalize() - pd.Timestamp("1970-01-01")).dt.days.to_numpy()
+    else:
+        out["day"] = np.zeros(len(df), dtype=int)
     if "spread" in df.columns:
         out["spr"] = df["spread"].to_numpy(dtype=float)
     else:
@@ -465,19 +528,30 @@ def backtest(df: pd.DataFrame, p: Params) -> Result:
              "breakout": p.brk_period + 50, "meanrev": max(p.bb_period, 50) + 50}[p.strategy]
     start = max(start, 2)
 
+    day = d["day"]
     pos = 0
     entry = sl = tp = sl_d = cost = 0.0
     opened = 0
+
+    def close_at(px: float, j: int) -> None:
+        nonlocal pos
+        swap = p.swap_long if pos > 0 else p.swap_short
+        pnl = pos * (px - entry) - cost + swap * (day[j] - day[opened])
+        r = pnl / sl_d
+        res.trades_r.append(r)
+        res.trades.append((opened, j, pos, r))
+        pos = 0
 
     for i in range(start, n - 1):
         # --- decision a la cloture de la barre i, execution a l'ouverture de i+1 ---
         if pos != 0:
             time_up = p.max_bars > 0 and (i + 1 - opened) >= p.max_bars
             if time_up or _signal_exit(d, p, i, pos):
-                res.trades_r.append((pos * (o[i + 1] - entry) - cost) / sl_d)
-                pos = 0
+                close_at(o[i + 1], i + 1)
         if pos == 0:
             sig, sdist, tdist = _entry(d, p, i)
+            if sig != 0 and p.max_spread_sl_ratio > 0 and spr[i + 1] > p.max_spread_sl_ratio * sdist:
+                sig = 0   # spread trop eleve par rapport au stop (meme filtre que l'EA)
             if sig != 0 and sdist > 0:
                 pos, sl_d, opened = sig, sdist, i + 1
                 entry, cost = o[i + 1], spr[i + 1]
@@ -518,8 +592,7 @@ def backtest(df: pd.DataFrame, p: Params) -> Result:
                 elif hit_tp:
                     exit_px = tp
         if exit_px is not None:
-            res.trades_r.append((pos * (exit_px - entry) - cost) / sl_d)
-            pos = 0
+            close_at(exit_px, j)
     return res
 
 
@@ -580,10 +653,11 @@ GRIDS = {
 }
 
 
-def optimize(df: pd.DataFrame, base: Params, risk_pct: float, split: float, top: int = 5) -> None:
-    """Recherche en grille sur l'echantillon d'apprentissage, puis verification hors echantillon."""
-    cut = int(len(df) * split)
-    ins, oos = df.iloc[:cut].reset_index(drop=True), df.iloc[cut:].reset_index(drop=True)
+def select_best(train: pd.DataFrame, base: Params, risk_pct: float,
+                min_trades: int = 50) -> tuple[Params | None, dict, list]:
+    """Recherche en grille sur l'apprentissage. Le critere de choix est la
+    fiabilite t (gain moyen ET nombre de trades), pas le gain moyen seul,
+    pour ne pas favoriser les reglages a 30 trades chanceux."""
     grid = GRIDS[base.strategy]
     keys = list(grid)
     rows = []
@@ -591,25 +665,35 @@ def optimize(df: pd.DataFrame, base: Params, risk_pct: float, split: float, top:
         p = replace(base, **dict(zip(keys, combo)))
         if p.strategy == "ema_cross" and p.fast >= p.slow:
             continue
-        st = backtest(ins, p).stats(risk_pct)
-        if st.get("trades", 0) >= 30:
-            rows.append((st["expectancy_R"], p, st))
+        st = backtest(train, p).stats(risk_pct)
+        if st.get("trades", 0) >= min_trades and not math.isnan(st["t_stat"]):
+            rows.append((st["t_stat"], p, st))
     rows.sort(key=lambda x: x[0], reverse=True)
-    print(f"\n=== Optimisation {base.strategy} : {len(rows)} combinaisons testees sur {cut} barres "
-          f"(apprentissage) ===")
-    print(f"Top {top} en apprentissage, et leur resultat sur les donnees JAMAIS VUES (hors echantillon) :")
-    for _, p, st in rows[:top]:
-        st_o = evaluate(oos, p, risk_pct)
-        ok, lines = verdict(st_o)
-        print(f"\n  {({k: getattr(p, k) for k in keys})}")
-        print(f"   IN  : {fmt(st)}")
-        print(f"   OUT : {fmt(st_o)}")
-        print(f"   => {'VALIDE' if ok else 'NON VALIDE'} hors echantillon")
-        for line in lines:
-            print("   " + line)
-    print("\nInterpretation : seul un reglage VALIDE hors echantillon merite un test sur compte demo.")
-    print(f"Attention : {len(rows)} combinaisons testees -> le meilleur resultat en apprentissage est")
-    print("toujours flatteur par hasard. Seule la ligne OUT compte.")
+    if not rows:
+        return None, {}, keys
+    return rows[0][1], rows[0][2], keys
+
+
+def optimize(df: pd.DataFrame, base: Params, risk_pct: float, split: float) -> tuple[bool, Params | None, dict]:
+    """Apprentissage sur le debut de l'historique, puis UN SEUL test (le meilleur
+    reglage) sur la fin, jamais vue. Tester plusieurs reglages sur la fin
+    reviendrait a la "consommer" et a laisser passer des faux positifs."""
+    cut = int(len(df) * split)
+    train, test = df.iloc[:cut].reset_index(drop=True), df.iloc[cut:].reset_index(drop=True)
+    best, st_in, keys = select_best(train, base, risk_pct)
+    print(f"\n=== Optimisation {base.strategy} : apprentissage {cut} barres, test final {len(test)} barres ===")
+    if best is None:
+        print("Aucun reglage avec assez de trades en apprentissage.")
+        return False, None, {}
+    st_out = evaluate(test, best, risk_pct)
+    ok, lines = verdict(st_out)
+    print(f"  Meilleur reglage : {({k: getattr(best, k) for k in keys})}")
+    print(f"   apprentissage : {fmt(st_in)}")
+    print(f"   test final    : {fmt(st_out)}")
+    print(f"   => {'VALIDE' if ok else 'NON VALIDE'} sur la periode jamais vue")
+    for line in lines:
+        print("   " + line)
+    return ok, best, st_out
 
 
 def run_one(df: pd.DataFrame, p: Params, risk: float, label: str) -> dict:
@@ -643,7 +727,12 @@ def main() -> None:
     ap.add_argument("--spike-slippage", type=float, default=1.0,
                     help="DRIFT : part du depassement d'un pic perdue au-dela du SL (1.0 = realiste)")
     ap.add_argument("--optimize", action="store_true", help="recherche en grille + validation hors echantillon")
-    ap.add_argument("--split", type=float, default=0.6, help="part d'apprentissage pour --optimize")
+    ap.add_argument("--split", type=float, default=0.7, help="part d'apprentissage pour --optimize")
+    ap.add_argument("--max-spread-ratio", type=float, default=0.10,
+                    help="trade ignore si spread > X fois la distance du stop (comme l'EA)")
+    ap.add_argument("--swap-long", type=float, default=0.0, help="swap par nuit, achat (unites de prix, + = credit)")
+    ap.add_argument("--swap-short", type=float, default=0.0, help="swap par nuit, vente (unites de prix)")
+    ap.add_argument("--presets", help="fichier de calibration SyntX_Guardian_presets.csv a appliquer")
     args = ap.parse_args()
 
     if args.simulate:
@@ -659,6 +748,7 @@ def main() -> None:
 
     fam, level = detect_index(sym)
     found = find_preset(fam, level)
+    preset = found[1] if (found and not args.no_preset) else None
     if found is None and not (args.force or args.simulate):
         sys.exit(f"'{sym}' n'est pas dans la liste autorisee (FX Vol / SFX Vol 20-40-60, GainX). "
                  "Utilisez --symbol si le nom du fichier ne contient pas l'indice, ou --force.")
@@ -671,9 +761,16 @@ def main() -> None:
     if args.resample:
         df = resample(df, args.resample)
 
-    preset = found[1] if (found and not args.no_preset) else None
     default_strat = None if preset else ("drift" if fam == "GAINX" or "painx" in sym.lower() else "ema_cross")
-    base = Params(spread=args.spread, spike_slippage=args.spike_slippage)
+    base = Params(spread=args.spread, spike_slippage=args.spike_slippage,
+                  max_spread_sl_ratio=args.max_spread_ratio,
+                  swap_long=args.swap_long, swap_short=args.swap_short)
+    if args.presets and found:
+        overrides = load_overrides(args.presets).get(found[0].lower())
+        if overrides:
+            preset = None if args.no_preset else apply_overrides(found[1], overrides)
+            if overrides.get("enabled") == "0":
+                print(f"NOTE : {found[0]} est DESACTIVE dans la calibration.")
     p0, risk_mult, tf = apply_preset(preset, args.strategy or default_strat, base)
     risk = args.risk * risk_mult
     label = f"preset {found[0]} (UT conseillee {tf})" if preset else "parametres par defaut"

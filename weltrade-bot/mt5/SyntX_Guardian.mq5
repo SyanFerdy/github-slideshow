@@ -8,24 +8,28 @@
 //|          cassure de canal, ou retour a la moyenne                |
 //|   - GainX 400/600/800/999/1200 -> strategie DRIFT (anti-pic)     |
 //|                                                                  |
-//|  Chaque indice a son preset (parametres + unite de temps), tout  |
-//|  est reglable dans les entrees sans toucher au code.             |
+//|  Reglages par indice, par ordre de priorite :                    |
+//|   1. fichier de calibration Common\Files\SyntX_Guardian_presets.csv|
+//|      (produit par backtest/calibrate.py a partir de vos donnees) |
+//|   2. entrees "Unite de temps / Strategie par indice"              |
+//|   3. presets integres (LoadPreset)                               |
+//|  Un indice desactive par la calibration ou par son interrupteur  |
+//|  ne trade pas.                                                   |
 //|                                                                  |
-//|  Gestion du risque (partagee entre tous les graphiques qui ont   |
-//|  le meme numero magique, et conservee apres un redemarrage) :    |
+//|  Gestion du risque (partagee entre tous les graphiques du meme   |
+//|  compte et du meme numero magique, conservee au redemarrage) :   |
 //|   - % du capital par trade, plafond de risque total ouvert       |
 //|   - limite de perte journaliere, coupe-circuit sur drawdown      |
-//|   - filtres de spread, une seule position par indice             |
+//|     (depots et retraits pris en compte)                          |
+//|   - filtres de spread, controles de marge et de distances min.   |
 //|   - AUCUNE martingale, AUCUNE grille                             |
 //|                                                                  |
-//|  Journal : chaque trade clos est ecrit dans                      |
-//|  <Dossier commun>\Files\SyntX_Guardian_trades.csv                |
-//|  (a analyser avec backtest/analyze_trades.py).                   |
+//|  Journal : Common\Files\SyntX_Guardian_trades.csv                |
 //|                                                                  |
 //|  Aucun resultat n'est garanti. Testez sur compte demo.          |
 //+------------------------------------------------------------------+
 #property copyright "SyntX Guardian"
-#property version   "2.00"
+#property version   "2.10"
 
 #include <Trade\Trade.mqh>
 
@@ -57,9 +61,20 @@ enum ENUM_FAMILY
 //=== General
 input group "=== General ==="
 input bool   InpUsePresets        = true;      // Utiliser le preset de l'indice (recommande)
+input bool   InpUseCalibration    = true;      // Lire le fichier de calibration (si present)
 input bool   InpAllowOtherSymbols = false;     // Autoriser les indices hors liste (deconseille)
 input long   InpMagic             = 26112201;  // Numero magique (le MEME sur tous les graphiques)
 input bool   InpLogTrades         = true;      // Ecrire le journal des trades (CSV)
+
+//=== Activation par indice
+input group "=== Activation par indice ==="
+input bool InpEnable_FXVol20  = true;  // FX Vol 20
+input bool InpEnable_FXVol40  = true;  // FX Vol 40
+input bool InpEnable_FXVol60  = true;  // FX Vol 60
+input bool InpEnable_SFXVol20 = true;  // SFX Vol 20
+input bool InpEnable_SFXVol40 = true;  // SFX Vol 40
+input bool InpEnable_SFXVol60 = true;  // SFX Vol 60
+input bool InpEnable_GainX    = true;  // GainX (tous niveaux)
 
 //=== Risque
 input group "=== Gestion du risque ==="
@@ -70,6 +85,7 @@ input double InpMaxDDPercent        = 15.0;  // Drawdown max depuis le pic (%) -
 input int    InpMaxTradesPerDay     = 20;    // Nombre max de trades par jour et par indice
 input int    InpMaxSpreadPts        = 0;     // Spread max en points (0 = pas de filtre)
 input double InpMaxSpreadSLRatio    = 0.10;  // Spread max en fraction du stop (0 = off)
+input double InpMaxMarginUse        = 0.50;  // Part max de la marge libre utilisee par un trade
 input bool   InpResetHalt           = false; // Rearmer le coupe-circuit (remettre a false ensuite)
 
 //=== Unite de temps par indice
@@ -109,7 +125,7 @@ input int    InpDriftMaxBars  = 120;   // Sortie forcee apres N barres (0 = off)
 input group "=== Manuel : EMA / Cassure / Retour a la moyenne ==="
 input int    InpFastEMA    = 20;    // EMA rapide
 input int    InpSlowEMA    = 100;   // EMA lente
-input int    InpADXPeriod  = 14;    // Periode ADX
+input int    InpADXPeriod  = 14;    // Periode ADX (Wilder)
 input double InpADXMin     = 22.0;  // ADX minimum (croisement d'EMA)
 input int    InpATRPeriod  = 14;    // Periode ATR
 input double InpSL_ATR     = 2.0;   // Stop = X * ATR
@@ -119,8 +135,7 @@ input int    InpBrkPeriod  = 20;    // Cassure : periode du canal
 input int    InpBBPeriod   = 20;    // Retour moyenne : periode Bollinger
 input double InpBBDev      = 2.0;   // Retour moyenne : ecart-type Bollinger
 input int    InpRSIPeriod  = 14;    // Retour moyenne : periode RSI
-input double InpRSILow     = 30.0;  // Retour moyenne : RSI survente
-input double InpRSIHigh    = 70.0;  // Retour moyenne : RSI surachat
+input double InpRSILow     = 30.0;  // Retour moyenne : RSI survente (surachat = 100 - X)
 input double InpADXMaxMR   = 25.0;  // Retour moyenne : ADX max (marche sans tendance)
 input double InpMRSL_ATR   = 2.0;   // Retour moyenne : stop = X * ATR
 input int    InpMRMaxBars  = 40;    // Retour moyenne : sortie forcee apres N barres
@@ -157,31 +172,37 @@ struct SParams
    double          bbDev;
    int             rsiPeriod;
    double          rsiLow;
-   double          rsiHigh;
    double          adxMaxMR;
    double          mrSlATR;
   };
 
-SParams P;
+SParams     P;
+ENUM_FAMILY g_family = FAMILY_NONE;
 
 //--- Etat
 CTrade   trade;
 int      hDriftEMA = INVALID_HANDLE, hFast = INVALID_HANDLE, hSlow = INVALID_HANDLE;
 int      hADX = INVALID_HANDLE, hATR = INVALID_HANDLE, hBB = INVALID_HANDLE, hRSI = INVALID_HANDLE;
-datetime g_lastBar = 0;
+datetime g_lastBar      = 0;
+ulong    g_pendingClose = 0;   // position a fermer (nouvel essai a chaque tick)
 
 //--- Statistiques de pics (DRIFT)
 int    g_driftDir = 0, g_spikeCount = 0, g_barsSinceSpike = 0;
 double g_avgSpike = 0.0, g_spikeThresh = 0.0;
 
-const string LOG_FILE = "SyntX_Guardian_trades.csv";
+const string LOG_FILE    = "SyntX_Guardian_trades.csv";
+const string PRESET_FILE = "SyntX_Guardian_presets.csv";
 
 //+------------------------------------------------------------------+
 //| Etat persistant (variables globales du terminal)                 |
-//| Partage entre graphiques (meme numero magique) et conserve apres  |
-//| un redemarrage de MT5 ou un changement de parametres.            |
+//| Cle = compte + numero magique : un compte demo et un compte reel |
+//| sur le meme terminal ont chacun leur propre etat.                |
 //+------------------------------------------------------------------+
-string GVKey(const string k)              { return "SXG_" + IntegerToString(InpMagic) + "_" + k; }
+string GVKey(const string k)
+  {
+   return "SXG_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" +
+          IntegerToString(InpMagic) + "_" + k;
+  }
 double GVGet(const string k, double def)  { string n = GVKey(k); return GlobalVariableCheck(n) ? GlobalVariableGet(n) : def; }
 void   GVSet(const string k, double v)    { GlobalVariableSet(GVKey(k), v); }
 void   GVDel(const string k)              { GlobalVariableDel(GVKey(k)); }
@@ -247,8 +268,18 @@ string StratName(ENUM_STRATEGY s)
    return "?";
   }
 
+bool IndexEnabledByInput(ENUM_FAMILY fam, int level)
+  {
+   if(fam == FAMILY_GAINX) return InpEnable_GainX;
+   if(fam == FAMILY_FXVOL)
+      return level == 20 ? InpEnable_FXVol20 : (level == 40 ? InpEnable_FXVol40 : (level == 60 ? InpEnable_FXVol60 : true));
+   if(fam == FAMILY_SFX)
+      return level == 20 ? InpEnable_SFXVol20 : (level == 40 ? InpEnable_SFXVol40 : (level == 60 ? InpEnable_SFXVol60 : true));
+   return true;
+  }
+
 //+------------------------------------------------------------------+
-//| Presets par indice                                               |
+//| Presets integres (identiques a PRESETS dans syntx_backtest.py)   |
 //+------------------------------------------------------------------+
 void SetVol(string name, ENUM_TIMEFRAMES tf, ENUM_VOL_STRATEGY vs, double riskMult,
             int fast, int slow, double adxMin, double slATR, double tpATR, double trailATR,
@@ -258,7 +289,7 @@ void SetVol(string name, ENUM_TIMEFRAMES tf, ENUM_VOL_STRATEGY vs, double riskMu
    P.strat = vs == VS_BREAKOUT ? STRAT_BREAKOUT : (vs == VS_MEANREV ? STRAT_MEANREV : STRAT_EMA_CROSS);
    P.fast = fast; P.slow = slow; P.adxPeriod = 14; P.adxMin = adxMin; P.atrPeriod = 14;
    P.slATR = slATR; P.tpATR = tpATR; P.trailATR = trailATR; P.brkPeriod = brkPeriod;
-   P.bbPeriod = 20; P.bbDev = bbDev; P.rsiPeriod = 14; P.rsiLow = rsiLow; P.rsiHigh = 100.0 - rsiLow;
+   P.bbPeriod = 20; P.bbDev = bbDev; P.rsiPeriod = 14; P.rsiLow = rsiLow;
    P.adxMaxMR = adxMaxMR; P.mrSlATR = mrSlATR;
    P.maxBars = P.strat == STRAT_MEANREV ? 40 : 0;
   }
@@ -318,8 +349,111 @@ void LoadManual()
    P.fast = InpFastEMA; P.slow = InpSlowEMA; P.adxPeriod = InpADXPeriod; P.adxMin = InpADXMin;
    P.atrPeriod = InpATRPeriod; P.slATR = InpSL_ATR; P.tpATR = InpTP_ATR; P.trailATR = InpTrail_ATR;
    P.brkPeriod = InpBrkPeriod; P.bbPeriod = InpBBPeriod; P.bbDev = InpBBDev; P.rsiPeriod = InpRSIPeriod;
-   P.rsiLow = InpRSILow; P.rsiHigh = InpRSIHigh; P.adxMaxMR = InpADXMaxMR; P.mrSlATR = InpMRSL_ATR;
+   P.rsiLow = InpRSILow; P.adxMaxMR = InpADXMaxMR; P.mrSlATR = InpMRSL_ATR;
    P.maxBars = P.strat == STRAT_DRIFT ? InpDriftMaxBars : (P.strat == STRAT_MEANREV ? InpMRMaxBars : 0);
+  }
+
+//+------------------------------------------------------------------+
+//| Fichier de calibration (produit par backtest/calibrate.py)       |
+//| Format : indice,cle,valeur  -  ex. "FX Vol 40,sl_atr,2.5"        |
+//+------------------------------------------------------------------+
+bool TFFromString(string s, ENUM_TIMEFRAMES &tf)
+  {
+   StringToUpper(s);
+   if(s == "M1")  { tf = PERIOD_M1;  return true; }
+   if(s == "M5")  { tf = PERIOD_M5;  return true; }
+   if(s == "M15") { tf = PERIOD_M15; return true; }
+   if(s == "M30") { tf = PERIOD_M30; return true; }
+   if(s == "H1")  { tf = PERIOD_H1;  return true; }
+   if(s == "H4")  { tf = PERIOD_H4;  return true; }
+   return false;
+  }
+
+bool SetCalibratedValue(const string key, const string val)
+  {
+   double d = StringToDouble(val);
+   int    n = (int)StringToInteger(val);
+   if(key == "tf")
+     {
+      ENUM_TIMEFRAMES tf;
+      if(!TFFromString(val, tf)) return false;
+      P.tf = tf;
+      return true;
+     }
+   if(key == "strategy")
+     {
+      ENUM_STRATEGY s;
+      if(val == "ema_cross")     s = STRAT_EMA_CROSS;
+      else if(val == "breakout") s = STRAT_BREAKOUT;
+      else if(val == "meanrev")  s = STRAT_MEANREV;
+      else if(val == "drift")    s = STRAT_DRIFT;
+      else return false;
+      // Coherence : DRIFT reserve a GainX, et GainX reserve a DRIFT
+      if((s == STRAT_DRIFT) != (g_family == FAMILY_GAINX)) return false;
+      P.strat = s;
+      if(s == STRAT_MEANREV && P.maxBars == 0) P.maxBars = 40;
+      if(s == STRAT_EMA_CROSS || s == STRAT_BREAKOUT) P.maxBars = 0;
+      return true;
+     }
+   if(key == "risk_mult")   { P.riskMult = MathMin(MathMax(d, 0.0), 2.0); return true; }
+   if(key == "fast")        { P.fast = n;        return n > 0; }
+   if(key == "slow")        { P.slow = n;        return n > 0; }
+   if(key == "adx_min")     { P.adxMin = d;      return true; }
+   if(key == "sl_atr")      { P.slATR = d;       return d > 0; }
+   if(key == "tp_atr")      { P.tpATR = d;       return d >= 0; }
+   if(key == "trail_atr")   { P.trailATR = d;    return d >= 0; }
+   if(key == "brk_period")  { P.brkPeriod = n;   return n > 1; }
+   if(key == "bb_dev")      { P.bbDev = d;       return d > 0; }
+   if(key == "rsi_low")     { P.rsiLow = d;      return d > 0 && d < 50; }
+   if(key == "adx_max_mr")  { P.adxMaxMR = d;    return true; }
+   if(key == "mr_sl_atr")   { P.mrSlATR = d;     return d > 0; }
+   if(key == "max_bars")    { P.maxBars = n;     return n >= 0; }
+   if(key == "lookback")    { P.lookback = n;    return n >= 200; }
+   if(key == "drift_ema")   { P.driftEMA = n;    return n > 0; }
+   if(key == "cooldown")    { P.cooldown = n;    return n >= 0; }
+   if(key == "sl_spike")    { P.slSpike = d;     return d > 0; }
+   if(key == "tp_spike")    { P.tpSpike = d;     return d >= 0; }
+   if(key == "spike_mult")  { P.spikeMult = d;   return d > 1; }
+   if(key == "min_spikes")  { P.minSpikes = n;   return n > 0; }
+   return false;
+  }
+
+//--- Retourne false si la calibration desactive cet indice
+bool ApplyCalibration()
+  {
+   if(!InpUseCalibration) return true;
+   int fh = FileOpen(PRESET_FILE, FILE_READ | FILE_CSV | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ, ',');
+   if(fh == INVALID_HANDLE)
+     {
+      Print("Pas de fichier de calibration : presets integres utilises.");
+      return true;
+     }
+   bool enabled = true, found = false;
+   int applied = 0, rejected = 0;
+   while(!FileIsEnding(fh))
+     {
+      string name = FileReadString(fh);
+      if(FileIsLineEnding(fh)) continue;
+      string key  = FileReadString(fh);
+      if(FileIsLineEnding(fh)) continue;
+      string val  = FileReadString(fh);
+      StringTrimLeft(name); StringTrimRight(name);
+      StringTrimLeft(key);  StringTrimRight(key);
+      StringTrimLeft(val);  StringTrimRight(val);
+      if(StringCompare(name, P.name, false) != 0) continue;
+      found = true;
+      if(key == "enabled") { enabled = StringToInteger(val) != 0; continue; }
+      if(SetCalibratedValue(key, val)) applied++;
+      else { rejected++; PrintFormat("Calibration : valeur refusee %s = %s", key, val); }
+     }
+   FileClose(fh);
+   if(found)
+      PrintFormat("Calibration appliquee a %s : %d valeurs%s%s", P.name, applied,
+                  rejected > 0 ? StringFormat(", %d refusees", rejected) : "",
+                  enabled ? "" : " - INDICE DESACTIVE");
+   else
+      PrintFormat("%s absent du fichier de calibration : presets integres utilises.", P.name);
+   return enabled;
   }
 
 //+------------------------------------------------------------------+
@@ -330,26 +464,42 @@ int OnInit()
    trade.SetTypeFillingBySymbol(_Symbol);
 
    int level;
-   ENUM_FAMILY fam = DetectIndex(_Symbol, level);
-   bool allowed = (fam == FAMILY_GAINX) ||
-                  ((fam == FAMILY_FXVOL || fam == FAMILY_SFX) && (level == 20 || level == 40 || level == 60));
+   g_family = DetectIndex(_Symbol, level);
+   bool allowed = (g_family == FAMILY_GAINX) ||
+                  ((g_family == FAMILY_FXVOL || g_family == FAMILY_SFX) && (level == 20 || level == 40 || level == 60));
    if(!allowed && !InpAllowOtherSymbols)
      {
       PrintFormat("%s n'est pas dans la liste autorisee (FX Vol / SFX Vol 20-40-60, GainX). "
                   "Le bot refuse de trader cet indice.", _Symbol);
       return INIT_PARAMETERS_INCORRECT;
      }
+   if(allowed && !IndexEnabledByInput(g_family, level))
+     {
+      PrintFormat("%s est desactive dans les entrees (groupe Activation par indice).", _Symbol);
+      return INIT_PARAMETERS_INCORRECT;
+     }
 
-   if(InpUsePresets && allowed) LoadPreset(fam, level);
+   if(InpUsePresets && allowed) LoadPreset(g_family, level);
    else                         LoadManual();
+
+   if(InpUsePresets && allowed && !ApplyCalibration())
+     {
+      PrintFormat("%s est desactive par la calibration (pas d'avantage valide sur ses donnees).", P.name);
+      return INIT_PARAMETERS_INCORRECT;
+     }
+
+   if(!ValidateParams()) return INIT_PARAMETERS_INCORRECT;
 
    if(P.strat == STRAT_DRIFT && PeriodSeconds(P.tf) > PeriodSeconds(PERIOD_M5))
       PrintFormat("ATTENTION : DRIFT en %s. Les pics durent quelques secondes : au-dela de M5 "
                   "ils sont noyes dans la barre. M1 conseille.", EnumToString(P.tf));
 
-   if(!CreateIndicators()) return INIT_FAILED;
+   if(!CreateIndicators())
+     {
+      Print("Impossible de creer les indicateurs.");
+      return INIT_FAILED;
+     }
 
-   // Coupe-circuit : rearmement manuel uniquement
    if(InpResetHalt)
      {
       GVDel("HALT");
@@ -360,9 +510,29 @@ int OnInit()
       Print("Coupe-circuit ACTIF (drawdown max atteint precedemment) : le bot ne tradera pas. "
             "Analysez les resultats avant de le rearmer avec InpResetHalt = true.");
 
-   PrintFormat("SyntX Guardian v2 sur %s : preset %s, strategie %s, UT %s, risque %.2f%%",
-               _Symbol, P.name, StratName(P.strat), EnumToString(P.tf), InpRiskPercent * P.riskMult);
+   PrintFormat("SyntX Guardian v2.1 sur %s : preset %s, strategie %s, UT %s, risque %.2f%%, "
+               "distance min. %d pts, gel %d pts",
+               _Symbol, P.name, StratName(P.strat), EnumToString(P.tf), InpRiskPercent * P.riskMult,
+               (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL),
+               (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL));
    return INIT_SUCCEEDED;
+  }
+
+bool ValidateParams()
+  {
+   string err = "";
+   if(P.strat == STRAT_EMA_CROSS && (P.fast <= 0 || P.slow <= P.fast)) err = "EMA rapide/lente incoherentes";
+   if((P.strat == STRAT_EMA_CROSS || P.strat == STRAT_BREAKOUT) && P.slATR <= 0) err = "stop nul";
+   if(P.strat == STRAT_MEANREV && P.mrSlATR <= 0)                      err = "stop nul";
+   if(P.strat == STRAT_BREAKOUT && P.brkPeriod < 2)                    err = "canal trop court";
+   if(P.strat == STRAT_DRIFT && P.slSpike <= 0)                        err = "stop DRIFT nul";
+   if(InpRiskPercent <= 0 || InpRiskPercent > 5)                       err = "risque par trade hors [0 ; 5] %";
+   if(err != "")
+     {
+      Print("Parametres invalides : ", err);
+      return false;
+     }
+   return true;
   }
 
 bool CreateIndicators()
@@ -373,7 +543,7 @@ bool CreateIndicators()
       return hDriftEMA != INVALID_HANDLE;
      }
    hATR = iATR(_Symbol, P.tf, P.atrPeriod);
-   hADX = iADX(_Symbol, P.tf, P.adxPeriod);
+   hADX = iADXWilder(_Symbol, P.tf, P.adxPeriod);   // meme lissage que le backtester
    if(hATR == INVALID_HANDLE || hADX == INVALID_HANDLE) return false;
    if(P.strat == STRAT_EMA_CROSS)
      {
@@ -407,26 +577,52 @@ void OnTick()
   {
    UpdateRiskState();
 
-   if(P.trailATR > 0 && (P.strat == STRAT_EMA_CROSS || P.strat == STRAT_BREAKOUT))
-      ManageTrailing();
+   // Une fermeture qui a echoue est retentee a chaque tick
+   if(g_pendingClose > 0)
+     {
+      if(!PositionSelectByTicket(g_pendingClose)) g_pendingClose = 0;
+      else ClosePosition(g_pendingClose);
+     }
 
    datetime barTime = iTime(_Symbol, P.tf, 0);
    if(barTime == 0 || barTime == g_lastBar) return;
-   g_lastBar = barTime;
 
-   if(P.strat == STRAT_DRIFT) UpdateSpikeStats();
-   ManageExits();
+   // La barre n'est "consommee" que si les donnees etaient pretes :
+   // sinon on reessaie au tick suivant au lieu de rater le signal.
+   if(OnNewBar()) g_lastBar = barTime;
+  }
+
+bool OnNewBar()
+  {
+   if(!DataReady()) return false;
+
+   if(P.strat == STRAT_DRIFT && !UpdateSpikeStats()) return false;
+   if(!ManageExits()) return false;
+   ManageTrailing();
    ShowStatus();
 
-   if(!TradingAllowed() || HasPosition()) return;
+   if(!TradingAllowed() || HasPosition()) return true;
 
    switch(P.strat)
      {
-      case STRAT_DRIFT:     CheckDriftEntry();    break;
-      case STRAT_EMA_CROSS: CheckEmaEntry();      break;
-      case STRAT_BREAKOUT:  CheckBreakoutEntry(); break;
-      case STRAT_MEANREV:   CheckMeanRevEntry();  break;
+      case STRAT_DRIFT:     return CheckDriftEntry();
+      case STRAT_EMA_CROSS: return CheckEmaEntry();
+      case STRAT_BREAKOUT:  return CheckBreakoutEntry();
+      case STRAT_MEANREV:   return CheckMeanRevEntry();
      }
+   return true;
+  }
+
+bool DataReady()
+  {
+   int need = P.strat == STRAT_DRIFT ? 200 : 3;
+   if(Bars(_Symbol, P.tf) < need) return false;
+   int handles[7];
+   handles[0] = hDriftEMA; handles[1] = hFast; handles[2] = hSlow; handles[3] = hADX;
+   handles[4] = hATR; handles[5] = hBB; handles[6] = hRSI;
+   for(int i = 0; i < 7; i++)
+      if(handles[i] != INVALID_HANDLE && BarsCalculated(handles[i]) <= 0) return false;
+   return true;
   }
 
 //+------------------------------------------------------------------+
@@ -458,7 +654,25 @@ void UpdateRiskState()
       PrintFormat("COUPE-CIRCUIT : drawdown >= %.1f%% depuis le pic. Tous les graphiques s'arretent.",
                   InpMaxDDPercent);
      }
-   if(GVGet("HALT", 0) > 0 && HasPosition()) CloseAll();
+   if(GVGet("HALT", 0) > 0 && SelectMyPosition())
+      ClosePosition((ulong)PositionGetInteger(POSITION_TICKET));
+  }
+
+//--- Depot ou retrait : on decale le pic et l'equity de debut de journee
+//--- du meme montant, pour qu'un retrait ne declenche pas le coupe-circuit.
+void HandleBalanceDeal(ulong deal)
+  {
+   double amount = HistoryDealGetDouble(deal, DEAL_PROFIT);
+   if(amount == 0) return;
+   string key = GVKey("LASTBAL");
+   if(!GlobalVariableCheck(key)) GlobalVariableSet(key, 0);
+   double last = GlobalVariableGet(key);
+   if((double)deal <= last) return;
+   // Mise a jour atomique : un seul graphique traite chaque operation
+   if(!GlobalVariableSetOnCondition(key, (double)deal, last)) return;
+   if(GVGet("PEAK", 0) > 0)  GVSet("PEAK", MathMax(GVGet("PEAK", 0) + amount, 0.0));
+   if(GVGet("DAYEQ", 0) > 0) GVSet("DAYEQ", MathMax(GVGet("DAYEQ", 0) + amount, 0.0));
+   PrintFormat("Operation de solde %.2f prise en compte (pic et debut de journee ajustes).", amount);
   }
 
 double DailyLossPct()
@@ -477,10 +691,23 @@ double DrawdownPct()
 
 bool TradingAllowed()
   {
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED) ||
+      !AccountInfoInteger(ACCOUNT_TRADE_EXPERT))
+      return false;
+   long mode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   if(mode == SYMBOL_TRADE_MODE_DISABLED || mode == SYMBOL_TRADE_MODE_CLOSEONLY) return false;
    if(GVGet("HALT", 0) > 0) return false;
    if(DailyLossPct() >= InpDailyLossPercent) return false;
    if((int)GVGet(SymKey() + "_TRADES", 0) >= InpMaxTradesPerDay) return false;
    if(InpMaxSpreadPts > 0 && SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) > InpMaxSpreadPts) return false;
+   return true;
+  }
+
+bool DirectionAllowed(int dir)
+  {
+   long mode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   if(mode == SYMBOL_TRADE_MODE_LONGONLY)  return dir > 0;
+   if(mode == SYMBOL_TRADE_MODE_SHORTONLY) return dir < 0;
    return true;
   }
 
@@ -508,7 +735,6 @@ double OpenRiskMoney()
       double vol  = PositionGetDouble(POSITION_VOLUME);
       if(sl <= 0)
         {
-         // Pas de stop : on compte le risque initial enregistre, ou le risque de base
          long id = PositionGetInteger(POSITION_IDENTIFIER);
          total += GVGet("R_" + IntegerToString(id),
                         AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPercent / 100.0);
@@ -521,7 +747,7 @@ double OpenRiskMoney()
   }
 
 //+------------------------------------------------------------------+
-//| Positions                                                        |
+//| Positions et ordres                                              |
 //+------------------------------------------------------------------+
 bool SelectMyPosition()
   {
@@ -537,38 +763,60 @@ bool SelectMyPosition()
 
 bool HasPosition() { return SelectMyPosition(); }
 
-void CloseAll()
+bool ClosePosition(ulong ticket)
   {
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   if(trade.PositionClose(ticket))
      {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagic)
-         trade.PositionClose(ticket);
+      uint rc = trade.ResultRetcode();
+      if(rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_DONE_PARTIAL || rc == TRADE_RETCODE_PLACED)
+        {
+         if(g_pendingClose == ticket) g_pendingClose = 0;
+         return true;
+        }
      }
+   PrintFormat("Fermeture echouee (%d %s) : nouvel essai au prochain tick.",
+               trade.ResultRetcode(), trade.ResultRetcodeDescription());
+   g_pendingClose = ticket;
+   return false;
+  }
+
+//--- Distance minimale imposee par le broker pour un stop ou un objectif
+double MinStopDistance()
+  {
+   long   lvl    = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double spread = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   return (lvl + 1) * _Point + spread;
   }
 
 bool OpenPosition(int dir, double slDist, double tpDist)
   {
-   if(slDist <= 0) return false;
+   if(slDist <= 0 || !DirectionAllowed(dir)) return false;
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(ask <= 0 || bid <= 0) return false;
    if(InpMaxSpreadSLRatio > 0 && (ask - bid) > InpMaxSpreadSLRatio * slDist)
      {
       Print("Spread trop eleve par rapport au stop : trade ignore.");
       return false;
      }
 
+   // Distances minimales du broker : le stop est elargi si besoin
+   // (la taille du lot s'adapte, le risque en argent reste le meme).
+   double minDist = MinStopDistance();
+   if(slDist < minDist) slDist = minDist;
+   if(tpDist > 0 && tpDist < minDist) tpDist = minDist;
+
    double equity     = AccountInfoDouble(ACCOUNT_EQUITY);
    double lossPerLot = LossPerLot(_Symbol, slDist);
    double step       = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double vmin       = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double vmax       = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double vlimit     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_LIMIT);
    if(lossPerLot <= 0 || step <= 0) return false;
 
    double riskMoney = equity * InpRiskPercent * P.riskMult / 100.0;
-   double lots = MathFloor(riskMoney / lossPerLot / step) * step;
+   double lots = MathFloor(riskMoney / lossPerLot / step + 1e-9) * step;
    if(lots < vmin)
      {
       PrintFormat("Lot minimum (%.2f) trop gros pour risquer %.2f%% : trade ignore.",
@@ -576,6 +824,8 @@ bool OpenPosition(int dir, double slDist, double tpDist)
       return false;
      }
    lots = MathMin(lots, vmax);
+   if(vlimit > 0) lots = MathMin(lots, vlimit);
+   lots = NormalizeDouble(lots, (int)MathMax(0, MathCeil(-MathLog10(step))));
    double actualRisk = lots * lossPerLot;
 
    // Plafond de risque total, toutes positions du bot confondues
@@ -586,24 +836,34 @@ bool OpenPosition(int dir, double slDist, double tpDist)
       return false;
      }
 
+   // Marge disponible
+   double price = dir > 0 ? ask : bid;
+   double margin = 0.0;
+   if(!OrderCalcMargin(dir > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, _Symbol, lots, price, margin) ||
+      margin > AccountInfoDouble(ACCOUNT_MARGIN_FREE) * InpMaxMarginUse)
+     {
+      PrintFormat("Marge insuffisante (%.2f requis) : trade ignore.", margin);
+      return false;
+     }
+
    int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   double price  = dir > 0 ? ask : bid;
    double sl = NormalizeDouble(price - dir * slDist, digits);
    double tp = tpDist > 0 ? NormalizeDouble(price + dir * tpDist, digits) : 0.0;
    string tag = "SXG " + StratName(P.strat);
 
-   bool ok = dir > 0 ? trade.Buy(lots, _Symbol, 0.0, sl, tp, tag)
-                     : trade.Sell(lots, _Symbol, 0.0, sl, tp, tag);
-   if(!ok)
+   bool sent = dir > 0 ? trade.Buy(lots, _Symbol, 0.0, sl, tp, tag)
+                       : trade.Sell(lots, _Symbol, 0.0, sl, tp, tag);
+   uint rc = trade.ResultRetcode();
+   if(!sent || (rc != TRADE_RETCODE_DONE && rc != TRADE_RETCODE_DONE_PARTIAL && rc != TRADE_RETCODE_PLACED))
      {
-      PrintFormat("Echec ordre : %d %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
+      PrintFormat("Echec ordre : %d %s", rc, trade.ResultRetcodeDescription());
       return false;
      }
 
    string sk = SymKey();
    GVSet(sk + "_TRADES", GVGet(sk + "_TRADES", 0) + 1);
 
-   // Memorise le risque initial de la position (pour le calcul en R du journal)
+   // Memorise le risque initial de la position (calcul en R du journal)
    long posId = 0;
    ulong deal = trade.ResultDeal();
    if(deal > 0 && HistoryDealSelect(deal)) posId = HistoryDealGetInteger(deal, DEAL_POSITION_ID);
@@ -634,31 +894,32 @@ double ChannelLow(int startShift, int n)
   }
 
 //+------------------------------------------------------------------+
-//| Sorties (a chaque nouvelle barre)                                |
+//| Sorties (a chaque nouvelle barre). false = donnees indisponibles |
 //+------------------------------------------------------------------+
-void ManageExits()
+bool ManageExits()
   {
-   if(!SelectMyPosition()) return;
-   ulong  ticket = (ulong)PositionGetInteger(POSITION_TICKET);
-   int    dir    = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? 1 : -1;
+   if(!SelectMyPosition()) return true;
+   ulong    ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+   int      dir    = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? 1 : -1;
    datetime opened = (datetime)PositionGetInteger(POSITION_TIME);
 
    // Sortie temporelle (DRIFT, retour a la moyenne)
    if(P.maxBars > 0 && TimeCurrent() - opened >= (long)P.maxBars * PeriodSeconds(P.tf))
      {
-      trade.PositionClose(ticket);
-      return;
+      ClosePosition(ticket);
+      return true;
      }
 
    double close1 = iClose(_Symbol, P.tf, 1);
+   if(close1 <= 0) return false;
    bool exitNow = false;
 
    if(P.strat == STRAT_EMA_CROSS)
      {
       // La tendance est terminee quand les EMA se croisent en sens inverse
       double f[], s[];
-      if(Buf(hFast, 0, 1, 1, f) && Buf(hSlow, 0, 1, 1, s))
-         exitNow = dir > 0 ? f[0] < s[0] : f[0] > s[0];
+      if(!Buf(hFast, 0, 1, 1, f) || !Buf(hSlow, 0, 1, 1, s)) return false;
+      exitNow = dir > 0 ? f[0] < s[0] : f[0] > s[0];
      }
    else if(P.strat == STRAT_BREAKOUT)
      {
@@ -670,53 +931,67 @@ void ManageExits()
      {
       // Objectif = retour a la moyenne mobile de Bollinger
       double mid[];
-      if(Buf(hBB, 0, 1, 1, mid))
-         exitNow = dir > 0 ? close1 >= mid[0] : close1 <= mid[0];
+      if(!Buf(hBB, 0, 1, 1, mid)) return false;
+      exitNow = dir > 0 ? close1 >= mid[0] : close1 <= mid[0];
      }
 
-   if(exitNow) trade.PositionClose(ticket);
+   if(exitNow) ClosePosition(ticket);
+   return true;
   }
 
+//--- Trailing stop UNE FOIS PAR BARRE, a partir de la cloture de la barre
+//--- precedente (comme le backtester, et sans saturer le serveur d'ordres).
 void ManageTrailing()
   {
+   if(P.trailATR <= 0 || (P.strat != STRAT_EMA_CROSS && P.strat != STRAT_BREAKOUT)) return;
    if(!SelectMyPosition()) return;
    double atr[];
    if(!Buf(hATR, 0, 1, 1, atr) || atr[0] <= 0) return;
+   double close1 = iClose(_Symbol, P.tf, 1);
+   if(close1 <= 0) return;
 
    ulong  ticket = (ulong)PositionGetInteger(POSITION_TICKET);
    int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    double dist   = atr[0] * P.trailATR;
    double sl     = PositionGetDouble(POSITION_SL);
    double tp     = PositionGetDouble(POSITION_TP);
+   double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double freeze = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * _Point;
+   double stops  = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
 
    if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
      {
-      double newSL = NormalizeDouble(SymbolInfoDouble(_Symbol, SYMBOL_BID) - dist, digits);
-      if(newSL > sl + _Point) trade.PositionModify(ticket, newSL, tp);
+      double newSL = NormalizeDouble(MathMin(close1 - dist, bid - stops - _Point), digits);
+      if(newSL > sl + _Point && bid - sl > freeze)
+         if(!trade.PositionModify(ticket, newSL, tp))
+            PrintFormat("Trailing refuse : %d", trade.ResultRetcode());
      }
    else
      {
-      double newSL = NormalizeDouble(SymbolInfoDouble(_Symbol, SYMBOL_ASK) + dist, digits);
-      if(sl == 0 || newSL < sl - _Point) trade.PositionModify(ticket, newSL, tp);
+      double newSL = NormalizeDouble(MathMax(close1 + dist, ask + stops + _Point), digits);
+      if((sl == 0 || newSL < sl - _Point) && (sl == 0 || sl - ask > freeze))
+         if(!trade.PositionModify(ticket, newSL, tp))
+            PrintFormat("Trailing refuse : %d", trade.ResultRetcode());
      }
   }
 
 //+------------------------------------------------------------------+
 //| DRIFT (GainX)                                                    |
 //+------------------------------------------------------------------+
-void UpdateSpikeStats()
+bool UpdateSpikeStats()
   {
    MqlRates r[];
    ArraySetAsSeries(r, true);
    int n = CopyRates(_Symbol, P.tf, 1, P.lookback, r);
-   if(n < 200) { g_driftDir = 0; return; }
+   if(n < 200) { g_driftDir = 0; return false; }
 
    double bodies[];
    ArrayResize(bodies, n);
    for(int i = 0; i < n; i++) bodies[i] = MathAbs(r[i].close - r[i].open);
    ArraySort(bodies);
    double median = bodies[n / 2];
-   if(median <= 0) { g_driftDir = 0; return; }
+   if(median <= 0) { g_driftDir = 0; return true; }
 
    g_spikeThresh = median * P.spikeMult;
    double sumSigned = 0.0, sumAbs = 0.0;
@@ -740,76 +1015,90 @@ void UpdateSpikeStats()
    // Securite : l'indice ne se comporte pas comme prevu -> on ne trade pas
    if(P.expectedDrift != 0 && g_driftDir != 0 && g_driftDir != P.expectedDrift)
       g_driftDir = 0;
+   return true;
   }
 
-void CheckDriftEntry()
+bool CheckDriftEntry()
   {
-   if(g_driftDir == 0 || g_avgSpike <= 0 || g_barsSinceSpike < P.cooldown) return;
+   if(g_driftDir == 0 || g_avgSpike <= 0 || g_barsSinceSpike < P.cooldown) return true;
    double ema[];
-   if(!Buf(hDriftEMA, 0, 1, 2, ema)) return;
+   if(!Buf(hDriftEMA, 0, 1, 2, ema)) return false;
    double close1 = iClose(_Symbol, P.tf, 1);
    bool confirm = g_driftDir > 0 ? (close1 > ema[0] && ema[0] > ema[1])
                                  : (close1 < ema[0] && ema[0] < ema[1]);
    if(confirm) OpenPosition(g_driftDir, g_avgSpike * P.slSpike, g_avgSpike * P.tpSpike);
+   return true;
   }
 
 //+------------------------------------------------------------------+
 //| Croisement d'EMA                                                 |
 //+------------------------------------------------------------------+
-void CheckEmaEntry()
+bool CheckEmaEntry()
   {
    double f[], s[], adx[], atr[];
-   if(!Buf(hFast, 0, 1, 2, f) || !Buf(hSlow, 0, 1, 2, s)) return;
-   if(!Buf(hADX, 0, 1, 1, adx) || !Buf(hATR, 0, 1, 1, atr)) return;
-   if(adx[0] < P.adxMin || atr[0] <= 0) return;
+   if(!Buf(hFast, 0, 1, 2, f) || !Buf(hSlow, 0, 1, 2, s)) return false;
+   if(!Buf(hADX, 0, 1, 1, adx) || !Buf(hATR, 0, 1, 1, atr)) return false;
+   if(adx[0] < P.adxMin || atr[0] <= 0) return true;
 
    int dir = 0;
    if(f[1] <= s[1] && f[0] > s[0]) dir = 1;
    if(f[1] >= s[1] && f[0] < s[0]) dir = -1;
    if(dir != 0) OpenPosition(dir, atr[0] * P.slATR, atr[0] * P.tpATR);
+   return true;
   }
 
 //+------------------------------------------------------------------+
 //| Cassure de canal (Donchian)                                      |
 //+------------------------------------------------------------------+
-void CheckBreakoutEntry()
+bool CheckBreakoutEntry()
   {
    double atr[];
-   if(!Buf(hATR, 0, 1, 1, atr) || atr[0] <= 0) return;
+   if(!Buf(hATR, 0, 1, 1, atr)) return false;
+   if(atr[0] <= 0) return true;
    int n = P.brkPeriod;
    double c1 = iClose(_Symbol, P.tf, 1), c2 = iClose(_Symbol, P.tf, 2);
+   if(c1 <= 0 || c2 <= 0) return false;
    // Cassure "fraiche" : la barre 1 casse, la barre 2 ne cassait pas encore
    int dir = 0;
    if(c1 > ChannelHigh(2, n) && c2 <= ChannelHigh(3, n)) dir = 1;
    if(c1 < ChannelLow(2, n)  && c2 >= ChannelLow(3, n))  dir = -1;
    if(dir != 0) OpenPosition(dir, atr[0] * P.slATR, atr[0] * P.tpATR);
+   return true;
   }
 
 //+------------------------------------------------------------------+
 //| Retour a la moyenne (Bollinger + RSI, seulement sans tendance)   |
 //+------------------------------------------------------------------+
-void CheckMeanRevEntry()
+bool CheckMeanRevEntry()
   {
    double up[], lo[], rsi[], adx[], atr[];
-   if(!Buf(hBB, 1, 1, 1, up) || !Buf(hBB, 2, 1, 1, lo)) return;
-   if(!Buf(hRSI, 0, 1, 1, rsi) || !Buf(hADX, 0, 1, 1, adx) || !Buf(hATR, 0, 1, 1, atr)) return;
-   if(adx[0] > P.adxMaxMR || atr[0] <= 0) return;
+   if(!Buf(hBB, 1, 1, 1, up) || !Buf(hBB, 2, 1, 1, lo)) return false;
+   if(!Buf(hRSI, 0, 1, 1, rsi) || !Buf(hADX, 0, 1, 1, adx) || !Buf(hATR, 0, 1, 1, atr)) return false;
+   if(adx[0] > P.adxMaxMR || atr[0] <= 0) return true;
 
    double c1 = iClose(_Symbol, P.tf, 1);
    int dir = 0;
-   if(c1 < lo[0] && rsi[0] < P.rsiLow)  dir = 1;
-   if(c1 > up[0] && rsi[0] > P.rsiHigh) dir = -1;
+   if(c1 < lo[0] && rsi[0] < P.rsiLow)          dir = 1;
+   if(c1 > up[0] && rsi[0] > 100.0 - P.rsiLow)  dir = -1;
    if(dir != 0) OpenPosition(dir, atr[0] * P.mrSlATR, 0.0);   // sortie sur la moyenne
+   return true;
   }
 
 //+------------------------------------------------------------------+
-//| Journal des trades clos (CSV dans le dossier commun)             |
+//| Transactions : depots/retraits et journal des trades clos        |
 //+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request,
                         const MqlTradeResult &result)
   {
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal == 0) return;
    if(!HistoryDealSelect(trans.deal)) return;
+
+   if(HistoryDealGetInteger(trans.deal, DEAL_TYPE) == DEAL_TYPE_BALANCE)
+     {
+      HandleBalanceDeal(trans.deal);
+      return;
+     }
+
    if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol) return;
    long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
    if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) return;
@@ -818,8 +1107,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    datetime exitTime = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
    double   exitPx   = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
    double   volume   = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
-   double   pnl      = HistoryDealGetDouble(trans.deal, DEAL_PROFIT)
-                       + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
+   double   swap     = HistoryDealGetDouble(trans.deal, DEAL_SWAP);
+   double   pnl      = HistoryDealGetDouble(trans.deal, DEAL_PROFIT) + swap
                        + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
    long     reason   = HistoryDealGetInteger(trans.deal, DEAL_REASON);
 
@@ -855,14 +1144,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    if(fh == INVALID_HANDLE) return;
    if(FileSize(fh) == 0)
       FileWrite(fh, "exit_time", "symbol", "preset", "strategy", "timeframe", "direction", "volume",
-                "entry_time", "entry_price", "exit_price", "profit", "risk", "r", "exit_reason");
+                "entry_time", "entry_price", "exit_price", "profit", "swap", "risk", "r", "exit_reason");
    FileSeek(fh, 0, SEEK_END);
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    FileWrite(fh, TimeToString(exitTime, TIME_DATE | TIME_SECONDS), _Symbol, P.name, StratName(P.strat),
              EnumToString(P.tf), dirDeal == DEAL_TYPE_BUY ? "BUY" : "SELL", DoubleToString(volume, 2),
              TimeToString(entryTime, TIME_DATE | TIME_SECONDS), DoubleToString(entryPx, digits),
-             DoubleToString(exitPx, digits), DoubleToString(pnl, 2), DoubleToString(risk, 2),
-             DoubleToString(r, 3), why);
+             DoubleToString(exitPx, digits), DoubleToString(pnl, 2), DoubleToString(swap, 2),
+             DoubleToString(risk, 2), DoubleToString(r, 3), why);
    FileClose(fh);
   }
 
@@ -870,7 +1159,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 void ShowStatus()
   {
    double eq = AccountInfoDouble(ACCOUNT_EQUITY);
-   string s = StringFormat("SyntX Guardian v2 | %s | %s | %s %s | risque %.2f%%/trade\n",
+   string s = StringFormat("SyntX Guardian v2.1 | %s | %s | %s %s | risque %.2f%%/trade\n",
                            _Symbol, P.name, StratName(P.strat), EnumToString(P.tf),
                            InpRiskPercent * P.riskMult);
    s += StringFormat("Equity %.2f | DD %.2f%% / %.1f%% | perte jour %.2f%% / %.1f%% | risque ouvert %.2f%% / %.1f%%\n",
