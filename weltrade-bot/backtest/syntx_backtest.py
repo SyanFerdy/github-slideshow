@@ -1,28 +1,40 @@
 #!/usr/bin/env python3
 """
-Backtester pour SyntX Guardian (indices synthetiques Weltrade).
+Backtester pour SyntX Guardian v2 (indices synthetiques Weltrade).
 
-Reproduit les deux moteurs de l'Expert Advisor MT5 sur des donnees en barres
+Reproduit les strategies de l'Expert Advisor MT5 sur des donnees en barres
 pour verifier, AVANT de risquer de l'argent, s'il existe un vrai avantage :
 
-  - DRIFT : GainX / PainX. Trade dans le sens de la derive lente, contre les pics.
-  - TREND : croisement d'EMA + filtre ADX, stop/objectif en ATR, trailing ATR.
+  - drift     : GainX. Trade dans le sens de la derive lente, contre les pics.
+  - ema_cross : croisement d'EMA + filtre ADX, sortie sur croisement inverse.
+  - breakout  : cassure de canal (Donchian), sortie sur cassure inverse.
+  - meanrev   : retour a la moyenne (Bollinger + RSI), seulement sans tendance.
 
-Donnees : CSV exporte de MT5 (script ExportBars.mq5 fourni, ou Ctrl+U >
-Barres > Exporter). Colonnes acceptees (format MT5) :
-  <DATE> <TIME> <OPEN> <HIGH> <LOW> <CLOSE> [<TICKVOL> <VOL> <SPREAD>]
+Indices autorises : FX Vol / SFX Vol 20-40-60 et GainX. Le preset de
+l'indice (identique a l'EA) est choisi d'apres le nom du fichier ou --symbol.
+
+Donnees : CSV exporte de MT5 (script ExportBars.mq5 fourni). Colonnes :
+  <DATE> <TIME> <OPEN> <HIGH> <LOW> <CLOSE> [<TICKVOL> <SPREAD>]
 ou simplement : time,open,high,low,close[,spread]
 
 Exemples :
-  python syntx_backtest.py data/GainX_999_M1.csv --engine drift --spread 0.5
-  python syntx_backtest.py data/FX_Vol_20_M1.csv --engine trend --optimize
-  python syntx_backtest.py --simulate gainx --bars 200000 --engine drift
+  python syntx_backtest.py GainX_999_M1.csv --point 0.01
+  python syntx_backtest.py FX_Vol_40_M15.csv --point 0.01 --compare
+  python syntx_backtest.py SFX_Vol_20_H1.csv --point 0.01 --strategy breakout --optimize
+  python syntx_backtest.py --simulate gainx --spread 0.3
 
-Modele d'execution (volontairement prudent) :
-  - entree a l'ouverture de la barre suivante, spread paye a chaque trade ;
-  - si SL et TP sont touches dans la meme barre -> on suppose le SL ;
-  - quand un pic traverse le SL, le depassement est compte comme
-    glissement (--spike-slippage, 1.0 par defaut = realiste).
+Modele d'execution (neutre, sans biais volontaire) :
+  - decision a la cloture d'une barre, execution a l'ouverture de la suivante
+    (comme l'EA, qui agit a chaque nouvelle barre) ;
+  - spread paye a chaque trade ;
+  - ouverture au-dela du stop ou de l'objectif -> execution au prix
+    d'ouverture (dans les deux sens) ;
+  - stop et objectif touches dans la meme barre -> le plus proche de
+    l'ouverture est suppose touche en premier ;
+  - DRIFT : quand un pic traverse le stop, le depassement est perdu
+    (--spike-slippage, 1.0 = realiste) car un pic saute en un seul tick.
+Limite : le plafond de risque total et la limite journaliere de l'EA
+(qui portent sur tout le portefeuille) ne sont pas simules ici.
 """
 from __future__ import annotations
 
@@ -32,10 +44,26 @@ import math
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
+
+STRATEGIES = ("drift", "ema_cross", "breakout", "meanrev")
+VOL_STRATEGIES = ("ema_cross", "breakout", "meanrev")
+
+# Seuils minimaux (hors echantillon) pour considerer un indice comme rentable
+CRITERIA = {
+    "expectancy_R":  (0.10, "gain moyen par trade > +0,10 R"),
+    # t > 2,5 et non 2 : on teste jusqu'a 27 combinaisons indice x strategie,
+    # avec t > 2 environ une sur 40 "passe" par pur hasard.
+    "t_stat":        (2.5,  "fiabilite statistique t > 2,5"),
+    "trades":        (100,  "au moins 100 trades"),
+    "profit_factor": (1.3,  "profit factor > 1,3"),
+    "max_dd_pct":    (15.0, "perte max depuis un plus haut < 15 %"),
+    "stable_folds":  (3,    "gagnant sur au moins 3 des 4 periodes successives"),
+}
+N_FOLDS = 4
 
 
 # --------------------------------------------------------------------------
@@ -82,28 +110,33 @@ def simulate(kind: str, bars: int, ticks_per_bar: int = 60, spike_every: int = 9
         spike_mean = 8.0
         is_spike = rng.random(n) < p
         spikes = rng.exponential(spike_mean, n) * is_spike
-        drift = p * spike_mean / (1 - p) * (1.0 + edge)   # fair if edge = 0
-        # D'apres les descriptions trouvees : GainX monte lentement et chute
-        # par pics, PainX baisse lentement et bondit par pics.
+        drift = p * spike_mean / (1 - p) * (1.0 + edge)   # equitable si edge = 0
+        # GainX monte lentement et chute par pics ; PainX l'inverse.
         sign = 1.0 if kind == "gainx" else -1.0
         steps = sign * (np.where(is_spike, -spikes, drift) + noise)
     else:
         steps = rng.normal(edge * 0.01, 0.15, n)
-    price = 10000.0 + np.cumsum(steps)
-    price = price.reshape(bars, ticks_per_bar)
+    price = (10000.0 + np.cumsum(steps)).reshape(bars, ticks_per_bar)
     open_ = np.concatenate([[10000.0], price[:-1, -1]])
-    df = pd.DataFrame({
+    return pd.DataFrame({
         "time": pd.date_range("2025-01-01", periods=bars, freq="min"),
         "open": open_,
         "high": np.maximum(price.max(axis=1), open_),
         "low": np.minimum(price.min(axis=1), open_),
         "close": price[:, -1],
     })
-    return df
+
+
+def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Regroupe des barres (ex. M1 -> M15 avec rule='15min')."""
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    if "spread" in df.columns:
+        agg["spread"] = "mean"
+    return df.set_index("time").resample(rule).agg(agg).dropna().reset_index()
 
 
 # --------------------------------------------------------------------------
-# Indicateurs
+# Indicateurs (memes definitions que MT5)
 # --------------------------------------------------------------------------
 def ema(s: pd.Series, n: int) -> pd.Series:
     return s.ewm(span=n, adjust=False).mean()
@@ -111,7 +144,8 @@ def ema(s: pd.Series, n: int) -> pd.Series:
 
 def atr(df: pd.DataFrame, n: int) -> pd.Series:
     pc = df["close"].shift()
-    tr = pd.concat([df["high"] - df["low"], (df["high"] - pc).abs(), (df["low"] - pc).abs()], axis=1).max(axis=1)
+    tr = pd.concat([df["high"] - df["low"], (df["high"] - pc).abs(), (df["low"] - pc).abs()],
+                   axis=1).max(axis=1)
     return tr.ewm(alpha=1 / n, adjust=False).mean()
 
 
@@ -127,6 +161,19 @@ def adx(df: pd.DataFrame, n: int) -> pd.Series:
     return dx.ewm(alpha=1 / n, adjust=False).mean().fillna(0)
 
 
+def rsi(s: pd.Series, n: int) -> pd.Series:
+    d = s.diff()
+    gain = d.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
+    loss = (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
+    return (100 - 100 / (1 + gain / loss.replace(0, np.nan))).fillna(50)
+
+
+def bollinger(s: pd.Series, n: int, dev: float):
+    mid = s.rolling(n).mean()
+    sd = s.rolling(n).std(ddof=0)   # MT5 utilise l'ecart-type de population
+    return mid, mid + dev * sd, mid - dev * sd
+
+
 # --------------------------------------------------------------------------
 # Analyse des pics
 # --------------------------------------------------------------------------
@@ -137,29 +184,20 @@ def spike_report(df: pd.DataFrame, mult: float) -> dict:
     idx = np.flatnonzero(is_spike.to_numpy())
     rep = {
         "bars": len(df),
-        "median_body": med,
         "spikes": int(len(idx)),
         "spikes_up": int((body[is_spike] > 0).sum()),
         "spikes_down": int((body[is_spike] < 0).sum()),
         "avg_spike": float(body[is_spike].abs().mean()) if len(idx) else 0.0,
-        "net_move": float(df["close"].iloc[-1] - df["open"].iloc[0]),
+        "drift_per_bar": float(body[~is_spike].mean()),
+        "spike_per_bar": float(body[is_spike].sum() / len(df)),
     }
-    non_spike = body[~is_spike]
-    rep["drift_per_bar"] = float(non_spike.mean())
-    rep["spike_per_bar"] = float(body[is_spike].sum() / len(df))
     if len(idx) > 20:
         gaps = np.diff(idx)
-        rep["avg_bars_between"] = float(gaps.mean())
-        # Test d'absence de memoire : si les pics sont aleatoires (loi
-        # geometrique), la probabilite d'un pic "bientot" n'augmente pas
-        # avec le temps ecoule depuis le dernier. On compare la probabilite
-        # conditionnelle avant et apres l'ecart median.
         m = np.median(gaps)
-        early = (gaps <= m / 2).sum() / len(gaps)
-        cond_late = ((gaps > m) & (gaps <= 1.5 * m)).sum() / max((gaps > m).sum(), 1)
-        cond_early = early
-        rep["hazard_early"] = float(cond_early)
-        rep["hazard_late"] = float(cond_late)
+        rep["avg_bars_between"] = float(gaps.mean())
+        # Absence de memoire : P(pic tot) doit egaler P(pic tot | deja attendu m barres)
+        rep["hazard_early"] = float((gaps <= m / 2).sum() / len(gaps))
+        rep["hazard_late"] = float(((gaps > m) & (gaps <= 1.5 * m)).sum() / max((gaps > m).sum(), 1))
     return rep
 
 
@@ -176,18 +214,20 @@ def print_spike_report(rep: dict) -> None:
         print("     attendre que le pic soit 'du' ne donne AUCUN avantage.")
     print(f"Derive moyenne par barre : {rep['drift_per_bar']:+.5f}")
     print(f"Apport des pics / barre  : {rep['spike_per_bar']:+.5f}")
-    tot = rep['drift_per_bar'] * (rep['bars'] - rep['spikes']) / rep['bars'] + rep['spike_per_bar']
+    tot = rep["drift_per_bar"] * (rep["bars"] - rep["spikes"]) / rep["bars"] + rep["spike_per_bar"]
     print(f"=> Esperance nette/barre : {tot:+.5f}  (proche de 0 = marche equitable, pas d'avantage gratuit)")
 
 
 # --------------------------------------------------------------------------
-# Backtest
+# Parametres et presets (identiques a SyntX_Guardian.mq5)
 # --------------------------------------------------------------------------
 @dataclass
 class Params:
-    engine: str = "drift"
+    strategy: str = "ema_cross"
     spread: float = 0.0
     spike_slippage: float = 1.0
+    expected_drift: int = 0          # +1 pour GainX (securite)
+    max_bars: int = 0                # sortie temporelle (drift, meanrev)
     # drift
     lookback: int = 3000
     spike_mult: float = 6.0
@@ -196,8 +236,7 @@ class Params:
     cooldown: int = 3
     sl_spike: float = 1.2
     tp_spike: float = 0.6
-    max_bars: int = 120
-    # trend
+    # ema_cross / breakout
     fast: int = 20
     slow: int = 100
     adx_period: int = 14
@@ -206,168 +245,32 @@ class Params:
     sl_atr: float = 2.0
     tp_atr: float = 4.0
     trail_atr: float = 2.5
-    # securite : sens de derive attendu (+1 GainX, 0 = pas de controle)
-    expected_drift: int = 0
+    brk_period: int = 20
+    # meanrev
+    bb_period: int = 20
+    bb_dev: float = 2.0
+    rsi_period: int = 14
+    rsi_low: float = 30.0
+    adx_max_mr: float = 25.0
+    mr_sl_atr: float = 2.0
 
 
-@dataclass
-class Result:
-    trades_r: list = field(default_factory=list)   # resultat de chaque trade, en unites R (multiples du risque)
-
-    def stats(self, risk_pct: float) -> dict:
-        r = np.array(self.trades_r, dtype=float)
-        if len(r) == 0:
-            return {"trades": 0}
-        wins, losses = r[r > 0], r[r <= 0]
-        eq = np.cumprod(1 + r * risk_pct / 100.0)
-        peak = np.maximum.accumulate(eq)
-        dd = ((peak - eq) / peak).max() * 100
-        se = r.std(ddof=1) / math.sqrt(len(r)) if len(r) > 1 else float("nan")
-        return {
-            "trades": len(r),
-            "winrate": len(wins) / len(r) * 100,
-            "expectancy_R": r.mean(),
-            "t_stat": r.mean() / se if se and se > 0 else float("nan"),
-            "profit_factor": wins.sum() / -losses.sum() if losses.sum() < 0 else float("inf"),
-            "return_pct": (eq[-1] - 1) * 100,
-            "max_dd_pct": dd,
-        }
+def _vol(tf, risk, fast, slow, adx_min, sl, tp, trail, brk, bb_dev, rsi_low, adx_max, mr_sl):
+    return dict(tf=tf, risk_mult=risk, strategy="ema_cross", fast=fast, slow=slow, adx_min=adx_min,
+                sl_atr=sl, tp_atr=tp, trail_atr=trail, brk_period=brk, bb_dev=bb_dev,
+                rsi_low=rsi_low, adx_max_mr=adx_max, mr_sl_atr=mr_sl)
 
 
-def _prepare(df: pd.DataFrame, p: Params) -> dict:
-    o, h, l, c = (df[k].to_numpy() for k in ("open", "high", "low", "close"))
-    out = {"o": o, "h": h, "l": l, "c": c}
-    if "spread" in df.columns and p.spread <= 0:
-        out["spr"] = df["spread"].to_numpy(dtype=float)   # converted with --point
-    else:
-        out["spr"] = np.full(len(df), p.spread)
-    if p.engine == "drift":
-        body = df["close"] - df["open"]
-        absb = body.abs()
-        med = absb.rolling(p.lookback, min_periods=200).median()
-        thresh = med * p.spike_mult
-        is_spike = absb >= thresh
-        spike_body = body.where(is_spike, 0.0)
-        cnt = is_spike.astype(int).rolling(p.lookback, min_periods=200).sum()
-        signed = spike_body.rolling(p.lookback, min_periods=200).sum()
-        absum = spike_body.abs().rolling(p.lookback, min_periods=200).sum()
-        avg_spike = (absum / cnt.replace(0, np.nan)).fillna(0)
-        drift_dir = np.where(cnt >= p.min_spikes, np.where(signed > 0, -1, 1), 0)
-        if p.expected_drift:
-            drift_dir = np.where(drift_dir == p.expected_drift, drift_dir, 0)
-        # barres ecoulees depuis le dernier pic
-        grp = is_spike.cumsum()
-        since = df.groupby(grp).cumcount().to_numpy()
-        since = np.where(grp.to_numpy() == 0, 10**9, since)
-        e = ema(df["close"], p.drift_ema).to_numpy()
-        out.update(drift_dir=drift_dir, avg_spike=avg_spike.to_numpy(),
-                   since=since, ema=e, thresh=thresh.to_numpy())
-    else:
-        out.update(fast=ema(df["close"], p.fast).to_numpy(),
-                   slow=ema(df["close"], p.slow).to_numpy(),
-                   adx=adx(df, p.adx_period).to_numpy(),
-                   atr=atr(df, p.atr_period).to_numpy())
-    return out
-
-
-def backtest(df: pd.DataFrame, p: Params) -> Result:
-    d = _prepare(df, p)
-    o, h, l, c, spr = d["o"], d["h"], d["l"], d["c"], d["spr"]
-    n = len(c)
-    res = Result()
-    pos = 0
-    entry = sl = tp = risk = 0.0
-    opened = 0
-
-    start = max(p.lookback if p.engine == "drift" else p.slow * 3, 2)
-    i = start
-    while i < n - 1:
-        if pos == 0:
-            sig = 0
-            sl_d = tp_d = 0.0
-            if p.engine == "drift":
-                dd, a = d["drift_dir"][i], d["avg_spike"][i]
-                if dd != 0 and a > 0 and d["since"][i] >= p.cooldown and i >= 1:
-                    e0, e1 = d["ema"][i], d["ema"][i - 1]
-                    ok = (c[i] > e0 and e0 > e1) if dd > 0 else (c[i] < e0 and e0 < e1)
-                    if ok:
-                        sig, sl_d, tp_d = dd, a * p.sl_spike, a * p.tp_spike
-            else:
-                f, s = d["fast"], d["slow"]
-                if d["adx"][i] >= p.adx_min and d["atr"][i] > 0:
-                    if f[i - 1] <= s[i - 1] and f[i] > s[i]:
-                        sig = 1
-                    elif f[i - 1] >= s[i - 1] and f[i] < s[i]:
-                        sig = -1
-                    sl_d, tp_d = d["atr"][i] * p.sl_atr, d["atr"][i] * p.tp_atr
-            if sig != 0 and sl_d > 0:
-                pos = sig
-                entry = o[i + 1]
-                sl = entry - pos * sl_d
-                tp = entry + pos * tp_d if tp_d > 0 else 0.0
-                risk = sl_d + spr[i + 1]
-                opened = i + 1
-                i += 1
-            else:
-                i += 1
-                continue
-        # --- position ouverte : traitement de la barre i ---
-        exit_px = None
-        if pos > 0:
-            if l[i] <= sl:
-                overshoot = max(sl - l[i], 0) if o[i] > sl else 0
-                exit_px = (o[i] if o[i] < sl else sl - p.spike_slippage * overshoot)
-            elif tp and h[i] >= tp:
-                exit_px = tp
-        else:
-            if h[i] >= sl:
-                overshoot = max(h[i] - sl, 0) if o[i] < sl else 0
-                exit_px = (o[i] if o[i] > sl else sl + p.spike_slippage * overshoot)
-            elif tp and l[i] <= tp:
-                exit_px = tp
-        if exit_px is None and p.engine == "drift" and p.max_bars > 0 and i - opened + 1 >= p.max_bars:
-            exit_px = c[i]
-        if exit_px is None and p.engine == "trend" and p.trail_atr > 0:
-            dist = d["atr"][i] * p.trail_atr
-            if pos > 0:
-                sl = max(sl, c[i] - dist)
-            else:
-                sl = min(sl, c[i] + dist)
-        if exit_px is not None:
-            pnl = pos * (exit_px - entry) - spr[opened]
-            res.trades_r.append(pnl / risk)
-            pos = 0
-        i += 1
-    return res
-
-
-def fmt(st: dict) -> str:
-    if st.get("trades", 0) == 0:
-        return "aucun trade"
-    return (f"trades={st['trades']:5d}  gagnants={st['winrate']:5.1f}%  "
-            f"E={st['expectancy_R']:+.3f}R  t={st['t_stat']:+.2f}  PF={st['profit_factor']:.2f}  "
-            f"rendement={st['return_pct']:+8.1f}%  maxDD={st['max_dd_pct']:5.1f}%")
-
-
-# --------------------------------------------------------------------------
-# Presets par indice (identiques a ceux de SyntX_Guardian.mq5)
-# --------------------------------------------------------------------------
-# Seuls ces indices sont autorises ; les autres sont juges trop volatils.
-# Ces valeurs sont des POINTS DE DEPART a valider avec --optimize.
-# "tf" = unite de temps par defaut (modifiable dans l'EA : groupe
-# "Unite de temps par indice"). Pour tester une autre UT, exportez les
-# barres dans cette UT : le backtester travaille sur l'UT du fichier.
-_T = "trend"
 PRESETS: dict[tuple[str, int], dict] = {
-    #                 UT par defaut, risque, fast, slow, ADX, SL, TP, trail
-    ("FXVOL", 20):  dict(engine=_T, tf="H1",  risk_mult=1.0, fast=20, slow=100, adx_min=20, sl_atr=2.0, tp_atr=4.0, trail_atr=2.5),
-    ("FXVOL", 40):  dict(engine=_T, tf="M15", risk_mult=1.0, fast=20, slow=100, adx_min=22, sl_atr=2.2, tp_atr=4.0, trail_atr=2.5),
-    ("FXVOL", 60):  dict(engine=_T, tf="M15", risk_mult=0.8, fast=30, slow=150, adx_min=25, sl_atr=2.5, tp_atr=4.5, trail_atr=3.0),
-    ("SFXVOL", 20): dict(engine=_T, tf="H1",  risk_mult=1.0, fast=20, slow=120, adx_min=22, sl_atr=2.2, tp_atr=4.0, trail_atr=2.8),
-    ("SFXVOL", 40): dict(engine=_T, tf="M15", risk_mult=0.8, fast=25, slow=150, adx_min=25, sl_atr=2.5, tp_atr=4.5, trail_atr=3.0),
-    ("SFXVOL", 60): dict(engine=_T, tf="M15", risk_mult=0.6, fast=30, slow=200, adx_min=28, sl_atr=3.0, tp_atr=5.0, trail_atr=3.5),
+    #                     UT    risque fast slow ADX  SL   TP   trail canal BBdev RSIbas ADXmaxMR SL_MR
+    ("FXVOL", 20):  _vol("H1",  1.0, 20, 100, 20, 2.0, 4.0, 2.5, 20, 2.0, 30, 25, 2.0),
+    ("FXVOL", 40):  _vol("M15", 1.0, 20, 100, 22, 2.2, 4.0, 2.5, 30, 2.0, 30, 25, 2.2),
+    ("FXVOL", 60):  _vol("M15", 0.8, 30, 150, 25, 2.5, 4.5, 3.0, 40, 2.2, 28, 25, 2.5),
+    ("SFXVOL", 20): _vol("H1",  1.0, 20, 120, 22, 2.2, 4.0, 2.8, 25, 2.0, 30, 25, 2.2),
+    ("SFXVOL", 40): _vol("M15", 0.8, 25, 150, 25, 2.5, 4.5, 3.0, 35, 2.2, 28, 25, 2.5),
+    ("SFXVOL", 60): _vol("M15", 0.6, 30, 200, 28, 3.0, 5.0, 3.5, 45, 2.2, 28, 25, 3.0),
 }
-_GAINX = {  # niveau: (risque, lookback, EMA, cooldown, SL pic, TP pic, barres max)
+_GAINX = {  # niveau: (risque, lookback, EMA, attente, SL pic, TP pic, barres max)
     400:  (0.7, 2000, 30, 2, 1.3, 0.5, 30),
     600:  (0.8, 2500, 40, 3, 1.2, 0.6, 45),
     800:  (0.9, 3000, 50, 3, 1.2, 0.6, 60),
@@ -375,7 +278,7 @@ _GAINX = {  # niveau: (risque, lookback, EMA, cooldown, SL pic, TP pic, barres m
     1200: (1.0, 4000, 60, 4, 1.1, 0.7, 100),
 }
 for _lvl, (_r, _lb, _e, _cd, _sl, _tp, _mb) in _GAINX.items():
-    PRESETS[("GAINX", _lvl)] = dict(engine="drift", tf="M1", risk_mult=_r, lookback=_lb, drift_ema=_e,
+    PRESETS[("GAINX", _lvl)] = dict(tf="M1", risk_mult=_r, strategy="drift", lookback=_lb, drift_ema=_e,
                                     cooldown=_cd, sl_spike=_sl, tp_spike=_tp, max_bars=_mb,
                                     expected_drift=1)
 
@@ -405,56 +308,340 @@ def detect_tf(name: str) -> str | None:
     return m.group(1) if m else None
 
 
-def optimize(df: pd.DataFrame, base: Params, risk_pct: float, split: float) -> None:
+def apply_preset(preset: dict | None, strategy: str | None, base: Params) -> tuple[Params, float, str | None]:
+    """Retourne (parametres, multiplicateur de risque, UT conseillee)."""
+    tf, risk_mult, p = None, 1.0, base
+    if preset:
+        d = dict(preset)
+        tf = d.pop("tf")
+        risk_mult = d.pop("risk_mult")
+        p = replace(base, **d)
+    if strategy:
+        p = replace(p, strategy=strategy)
+    # sortie temporelle : seulement drift (preset) et retour a la moyenne
+    if p.strategy == "meanrev":
+        p = replace(p, max_bars=p.max_bars or 40)
+    elif p.strategy in ("ema_cross", "breakout"):
+        p = replace(p, max_bars=0)
+    elif p.strategy == "drift" and not p.max_bars:
+        p = replace(p, max_bars=120)
+    return p, risk_mult, tf
+
+
+# --------------------------------------------------------------------------
+# Backtest
+# --------------------------------------------------------------------------
+@dataclass
+class Result:
+    trades_r: list = field(default_factory=list)   # resultat de chaque trade, en R
+
+    def stats(self, risk_pct: float) -> dict:
+        return stats_from_r(np.array(self.trades_r, dtype=float), risk_pct)
+
+
+def stats_from_r(r: np.ndarray, risk_pct: float) -> dict:
+    if len(r) == 0:
+        return {"trades": 0}
+    wins, losses = r[r > 0], r[r <= 0]
+    eq = np.cumprod(1 + r * risk_pct / 100.0)
+    peak = np.maximum.accumulate(np.concatenate([[1.0], eq]))[1:]
+    dd = ((peak - eq) / peak).max() * 100
+    se = r.std(ddof=1) / math.sqrt(len(r)) if len(r) > 1 else float("nan")
+    return {
+        "trades": len(r),
+        "winrate": len(wins) / len(r) * 100,
+        "expectancy_R": float(r.mean()),
+        "t_stat": float(r.mean() / se) if se and se > 0 else float("nan"),
+        "profit_factor": float(wins.sum() / -losses.sum()) if losses.sum() < 0 else float("inf"),
+        "return_pct": float((eq[-1] - 1) * 100),
+        "max_dd_pct": float(dd),
+    }
+
+
+def _prepare(df: pd.DataFrame, p: Params) -> dict:
+    out = {k: df[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close")}
+    if "spread" in df.columns:
+        out["spr"] = df["spread"].to_numpy(dtype=float)
+    else:
+        out["spr"] = np.full(len(df), p.spread)
+    close = df["close"]
+
+    if p.strategy == "drift":
+        body = close - df["open"]
+        absb = body.abs()
+        mp = min(200, p.lookback)
+        med = absb.rolling(p.lookback, min_periods=mp).median()
+        is_spike = absb >= med * p.spike_mult
+        spike_body = body.where(is_spike, 0.0)
+        cnt = is_spike.astype(int).rolling(p.lookback, min_periods=mp).sum()
+        signed = spike_body.rolling(p.lookback, min_periods=mp).sum()
+        absum = spike_body.abs().rolling(p.lookback, min_periods=mp).sum()
+        avg_spike = (absum / cnt.replace(0, np.nan)).fillna(0)
+        drift_dir = np.where(cnt >= p.min_spikes, np.where(signed > 0, -1, 1), 0)
+        if p.expected_drift:
+            drift_dir = np.where(drift_dir == p.expected_drift, drift_dir, 0)
+        grp = is_spike.cumsum()
+        since = df.groupby(grp).cumcount().to_numpy()
+        since = np.where(grp.to_numpy() == 0, 10**9, since)
+        out.update(drift_dir=drift_dir, avg_spike=avg_spike.to_numpy(), since=since,
+                   ema=ema(close, p.drift_ema).to_numpy())
+        return out
+
+    out["atr"] = atr(df, p.atr_period).to_numpy()
+    out["adx"] = adx(df, p.adx_period).to_numpy()
+    if p.strategy == "ema_cross":
+        out["fast"] = ema(close, p.fast).to_numpy()
+        out["slow"] = ema(close, p.slow).to_numpy()
+    elif p.strategy == "breakout":
+        n, nx = p.brk_period, max(p.brk_period // 2, 2)
+        # canal des n barres PRECEDENTES (la barre qui casse est exclue)
+        out["ch_hi"] = df["high"].rolling(n).max().shift(1).to_numpy()
+        out["ch_lo"] = df["low"].rolling(n).min().shift(1).to_numpy()
+        out["ex_hi"] = df["high"].rolling(nx).max().shift(1).to_numpy()
+        out["ex_lo"] = df["low"].rolling(nx).min().shift(1).to_numpy()
+    elif p.strategy == "meanrev":
+        mid, up, lo = bollinger(close, p.bb_period, p.bb_dev)
+        out.update(mid=mid.to_numpy(), up=up.to_numpy(), lo=lo.to_numpy(),
+                   rsi=rsi(close, p.rsi_period).to_numpy())
+    return out
+
+
+def _entry(d: dict, p: Params, i: int) -> tuple[int, float, float]:
+    """Signal a la cloture de la barre i -> (sens, distance stop, distance objectif)."""
+    c = d["close"]
+    if p.strategy == "drift":
+        dd, a = d["drift_dir"][i], d["avg_spike"][i]
+        if dd == 0 or a <= 0 or d["since"][i] < p.cooldown:
+            return 0, 0.0, 0.0
+        e0, e1 = d["ema"][i], d["ema"][i - 1]
+        ok = (c[i] > e0 and e0 > e1) if dd > 0 else (c[i] < e0 and e0 < e1)
+        return (int(dd), a * p.sl_spike, a * p.tp_spike) if ok else (0, 0.0, 0.0)
+
+    a = d["atr"][i]
+    if not a > 0:
+        return 0, 0.0, 0.0
+    if p.strategy == "ema_cross":
+        f, s = d["fast"], d["slow"]
+        if d["adx"][i] < p.adx_min:
+            return 0, 0.0, 0.0
+        if f[i - 1] <= s[i - 1] and f[i] > s[i]:
+            return 1, a * p.sl_atr, a * p.tp_atr
+        if f[i - 1] >= s[i - 1] and f[i] < s[i]:
+            return -1, a * p.sl_atr, a * p.tp_atr
+    elif p.strategy == "breakout":
+        hi, lo = d["ch_hi"], d["ch_lo"]
+        if c[i] > hi[i] and c[i - 1] <= hi[i - 1]:
+            return 1, a * p.sl_atr, a * p.tp_atr
+        if c[i] < lo[i] and c[i - 1] >= lo[i - 1]:
+            return -1, a * p.sl_atr, a * p.tp_atr
+    elif p.strategy == "meanrev":
+        if d["adx"][i] > p.adx_max_mr:
+            return 0, 0.0, 0.0
+        if c[i] < d["lo"][i] and d["rsi"][i] < p.rsi_low:
+            return 1, a * p.mr_sl_atr, 0.0
+        if c[i] > d["up"][i] and d["rsi"][i] > 100 - p.rsi_low:
+            return -1, a * p.mr_sl_atr, 0.0
+    return 0, 0.0, 0.0
+
+
+def _signal_exit(d: dict, p: Params, i: int, pos: int) -> bool:
+    c = d["close"][i]
+    if p.strategy == "ema_cross":
+        return d["fast"][i] < d["slow"][i] if pos > 0 else d["fast"][i] > d["slow"][i]
+    if p.strategy == "breakout":
+        return c < d["ex_lo"][i] if pos > 0 else c > d["ex_hi"][i]
+    if p.strategy == "meanrev":
+        return c >= d["mid"][i] if pos > 0 else c <= d["mid"][i]
+    return False
+
+
+def backtest(df: pd.DataFrame, p: Params) -> Result:
+    d = _prepare(df, p)
+    o, h, l, c, spr = d["open"], d["high"], d["low"], d["close"], d["spr"]
+    n = len(c)
+    res = Result()
+
+    start = {"drift": p.lookback, "ema_cross": p.slow * 3,
+             "breakout": p.brk_period + 50, "meanrev": max(p.bb_period, 50) + 50}[p.strategy]
+    start = max(start, 2)
+
+    pos = 0
+    entry = sl = tp = sl_d = cost = 0.0
+    opened = 0
+
+    for i in range(start, n - 1):
+        # --- decision a la cloture de la barre i, execution a l'ouverture de i+1 ---
+        if pos != 0:
+            time_up = p.max_bars > 0 and (i + 1 - opened) >= p.max_bars
+            if time_up or _signal_exit(d, p, i, pos):
+                res.trades_r.append((pos * (o[i + 1] - entry) - cost) / sl_d)
+                pos = 0
+        if pos == 0:
+            sig, sdist, tdist = _entry(d, p, i)
+            if sig != 0 and sdist > 0:
+                pos, sl_d, opened = sig, sdist, i + 1
+                entry, cost = o[i + 1], spr[i + 1]
+                sl = entry - pos * sdist
+                tp = entry + pos * tdist if tdist > 0 else 0.0
+        elif p.trail_atr > 0 and p.strategy in ("ema_cross", "breakout"):
+            dist = d["atr"][i] * p.trail_atr
+            sl = max(sl, c[i] - dist) if pos > 0 else min(sl, c[i] + dist)
+
+        # --- deroulement de la barre i+1 : stop / objectif ---
+        if pos == 0:
+            continue
+        j = i + 1
+        slip = p.spike_slippage if p.strategy == "drift" else 0.0
+        exit_px = None
+        if pos > 0:
+            if o[j] <= sl or (tp and o[j] >= tp):
+                exit_px = o[j]                      # ouverture au-dela : prix d'ouverture
+            else:
+                hit_sl, hit_tp = l[j] <= sl, bool(tp) and h[j] >= tp
+                if hit_sl and hit_tp:               # le plus proche de l'ouverture d'abord
+                    hit_sl = (o[j] - sl) <= (tp - o[j])
+                    hit_tp = not hit_sl
+                if hit_sl:
+                    exit_px = sl - slip * (sl - l[j])
+                elif hit_tp:
+                    exit_px = tp
+        else:
+            if o[j] >= sl or (tp and o[j] <= tp):
+                exit_px = o[j]
+            else:
+                hit_sl, hit_tp = h[j] >= sl, bool(tp) and l[j] <= tp
+                if hit_sl and hit_tp:
+                    hit_sl = (sl - o[j]) <= (o[j] - tp)
+                    hit_tp = not hit_sl
+                if hit_sl:
+                    exit_px = sl + slip * (h[j] - sl)
+                elif hit_tp:
+                    exit_px = tp
+        if exit_px is not None:
+            res.trades_r.append((pos * (exit_px - entry) - cost) / sl_d)
+            pos = 0
+    return res
+
+
+# --------------------------------------------------------------------------
+# Affichage, verdict, optimisation
+# --------------------------------------------------------------------------
+def evaluate(df: pd.DataFrame, p: Params, risk_pct: float) -> dict:
+    """Statistiques + stabilite : nombre de periodes successives gagnantes."""
+    st = backtest(df, p).stats(risk_pct)
+    n = len(df)
+    folds = 0
+    for f in range(N_FOLDS):
+        part = df.iloc[f * n // N_FOLDS:(f + 1) * n // N_FOLDS].reset_index(drop=True)
+        sf = backtest(part, p).stats(risk_pct)
+        folds += int(sf.get("trades", 0) > 0 and sf["expectancy_R"] > 0)
+    st["stable_folds"] = folds
+    return st
+
+
+def fmt(st: dict) -> str:
+    if st.get("trades", 0) == 0:
+        return "aucun trade"
+    return (f"trades={st['trades']:5d}  gagnants={st['winrate']:5.1f}%  "
+            f"E={st['expectancy_R']:+.3f}R  t={st['t_stat']:+.2f}  PF={st['profit_factor']:.2f}  "
+            f"rendement={st['return_pct']:+8.1f}%  maxDD={st['max_dd_pct']:5.1f}%")
+
+
+def verdict(st: dict) -> tuple[bool, list[str]]:
+    """Verifie les seuils minimaux. Retourne (valide, lignes de detail)."""
+    lines, ok_all = [], True
+    has = st.get("trades", 0) > 0
+    for key, (thr, label) in CRITERIA.items():
+        val = st.get(key, 0) if has else 0
+        if key == "max_dd_pct":
+            ok = val < thr
+        elif key in ("trades", "stable_folds"):
+            ok = val >= thr
+        else:
+            ok = val > thr
+        ok = ok and has
+        ok_all &= ok
+        shown = f"{val:.2f}" if isinstance(val, float) else str(val)
+        if key == "stable_folds":
+            shown += f"/{N_FOLDS}"
+        lines.append(f"  [{'OK ' if ok else 'NON'}] {label} (obtenu : {shown})")
+    return ok_all, lines
+
+
+GRIDS = {
+    "drift": {"sl_spike": [0.8, 1.2, 2.0], "tp_spike": [0.3, 0.6, 1.0],
+              "drift_ema": [20, 50, 150], "max_bars": [30, 120, 400]},
+    "ema_cross": {"fast": [10, 20, 50], "slow": [100, 200], "adx_min": [0, 20, 30],
+                  "sl_atr": [1.5, 2.5], "tp_atr": [0, 3.0, 5.0]},
+    "breakout": {"brk_period": [10, 20, 40, 60], "sl_atr": [1.5, 2.5, 3.5],
+                 "tp_atr": [0, 3.0, 6.0], "trail_atr": [0, 2.5, 4.0]},
+    "meanrev": {"bb_dev": [1.8, 2.2, 2.6], "rsi_low": [25, 30, 35], "adx_max_mr": [20, 25, 30, 100],
+                "mr_sl_atr": [1.5, 2.5, 3.5], "max_bars": [20, 60]},
+}
+
+
+def optimize(df: pd.DataFrame, base: Params, risk_pct: float, split: float, top: int = 5) -> None:
     """Recherche en grille sur l'echantillon d'apprentissage, puis verification hors echantillon."""
     cut = int(len(df) * split)
     ins, oos = df.iloc[:cut].reset_index(drop=True), df.iloc[cut:].reset_index(drop=True)
-    if base.engine == "drift":
-        grid = {"sl_spike": [0.8, 1.2, 2.0], "tp_spike": [0.3, 0.6, 1.0],
-                "drift_ema": [20, 50, 150], "max_bars": [30, 120, 400]}
-    else:
-        grid = {"fast": [10, 20, 50], "slow": [100, 200], "adx_min": [0, 20, 30],
-                "sl_atr": [1.5, 2.5], "tp_atr": [0, 3.0, 5.0]}
+    grid = GRIDS[base.strategy]
     keys = list(grid)
     rows = []
     for combo in itertools.product(*grid.values()):
-        p = Params(**{**base.__dict__, **dict(zip(keys, combo))})
-        if p.engine == "trend" and p.fast >= p.slow:
+        p = replace(base, **dict(zip(keys, combo)))
+        if p.strategy == "ema_cross" and p.fast >= p.slow:
             continue
         st = backtest(ins, p).stats(risk_pct)
         if st.get("trades", 0) >= 30:
             rows.append((st["expectancy_R"], p, st))
     rows.sort(key=lambda x: x[0], reverse=True)
-    print(f"\n=== Optimisation : {len(rows)} combinaisons testees sur {cut} barres (apprentissage) ===")
-    print("Top 5 en apprentissage, et leur resultat sur les donnees JAMAIS VUES (hors echantillon) :")
-    for _, p, st in rows[:5]:
-        st_o = backtest(oos, p).stats(risk_pct)
-        params = {k: getattr(p, k) for k in keys}
-        print(f"\n  {params}")
+    print(f"\n=== Optimisation {base.strategy} : {len(rows)} combinaisons testees sur {cut} barres "
+          f"(apprentissage) ===")
+    print(f"Top {top} en apprentissage, et leur resultat sur les donnees JAMAIS VUES (hors echantillon) :")
+    for _, p, st in rows[:top]:
+        st_o = evaluate(oos, p, risk_pct)
+        ok, lines = verdict(st_o)
+        print(f"\n  {({k: getattr(p, k) for k in keys})}")
         print(f"   IN  : {fmt(st)}")
         print(f"   OUT : {fmt(st_o)}")
-    print("\nInterpretation : seul un avantage qui TIENT hors echantillon (E > 0 et t > 2)")
-    print("merite un test sur compte demo. Sinon c'est de la sur-optimisation (du hasard).")
+        print(f"   => {'VALIDE' if ok else 'NON VALIDE'} hors echantillon")
+        for line in lines:
+            print("   " + line)
+    print("\nInterpretation : seul un reglage VALIDE hors echantillon merite un test sur compte demo.")
+    print(f"Attention : {len(rows)} combinaisons testees -> le meilleur resultat en apprentissage est")
+    print("toujours flatteur par hasard. Seule la ligne OUT compte.")
+
+
+def run_one(df: pd.DataFrame, p: Params, risk: float, label: str) -> dict:
+    st = evaluate(df, p, risk)
+    print(f"\n=== {label} | strategie {p.strategy} | risque {risk:.2f}%/trade ===")
+    print(fmt(st))
+    ok, lines = verdict(st)
+    print(f"=> {'PROMETTEUR' if ok else 'NON VALIDE'} sur tout l'historique "
+          f"(a confirmer avec --optimize, puis en demo)")
+    for line in lines:
+        print(line)
+    return st
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv", nargs="?", help="CSV de barres exporte de MT5")
     ap.add_argument("--symbol", help="nom de l'indice (sinon deduit du nom du fichier), ex. 'FX Vol 40'")
+    ap.add_argument("--strategy", choices=STRATEGIES, help="strategie (sinon celle du preset)")
+    ap.add_argument("--compare", action="store_true", help="comparer les 3 strategies FX/SFX Vol")
+    ap.add_argument("--resample", help="regrouper les barres avant le test (ex. 15min, 1h)")
     ap.add_argument("--simulate", choices=["gainx", "painx", "fxvol"], help="utiliser des donnees simulees")
     ap.add_argument("--bars", type=int, default=150_000)
     ap.add_argument("--edge", type=float, default=0.0, help="biais artificiel dans la simulation")
-    ap.add_argument("--engine", choices=["drift", "trend"], help="forcer le moteur (sinon celui du preset)")
     ap.add_argument("--no-preset", action="store_true", help="ignorer le preset de l'indice")
     ap.add_argument("--force", action="store_true", help="autoriser un indice hors liste (deconseille)")
     ap.add_argument("--spread", type=float, default=0.0, help="spread en unites de prix")
     ap.add_argument("--point", type=float, default=0.0,
                     help="taille du point : utilise la colonne SPREAD (en points) convertie en prix")
-    ap.add_argument("--risk", type=float, default=0.5,
-                    help="risque de base par trade en %% (module par le preset)")
-    ap.add_argument("--spike-mult", type=float, default=6.0)
+    ap.add_argument("--risk", type=float, default=0.5, help="risque de base par trade en %% (module par le preset)")
     ap.add_argument("--spike-slippage", type=float, default=1.0,
-                    help="part du depassement d'un pic perdue au-dela du SL (1.0 = realiste, 0 = optimiste)")
+                    help="DRIFT : part du depassement d'un pic perdue au-dela du SL (1.0 = realiste)")
     ap.add_argument("--optimize", action="store_true", help="recherche en grille + validation hors echantillon")
     ap.add_argument("--split", type=float, default=0.6, help="part d'apprentissage pour --optimize")
     args = ap.parse_args()
@@ -481,37 +668,37 @@ def main() -> None:
             df["spread"] = df["spread"] * args.point
         else:
             df = df.drop(columns="spread")
+    if args.resample:
+        df = resample(df, args.resample)
 
-    p = Params(spread=args.spread, spike_mult=args.spike_mult, spike_slippage=args.spike_slippage)
-    risk = args.risk
-    label = "parametres par defaut"
-    if found and not args.no_preset:
-        label, preset = found
-        preset = dict(preset)
-        tf = preset.pop("tf")
-        risk = args.risk * preset.pop("risk_mult")
-        for k, v in preset.items():
-            setattr(p, k, v)
-        label = f"preset {label} (UT conseillee {tf})"
-        data_tf = detect_tf(name)
+    preset = found[1] if (found and not args.no_preset) else None
+    default_strat = None if preset else ("drift" if fam == "GAINX" or "painx" in sym.lower() else "ema_cross")
+    base = Params(spread=args.spread, spike_slippage=args.spike_slippage)
+    p0, risk_mult, tf = apply_preset(preset, args.strategy or default_strat, base)
+    risk = args.risk * risk_mult
+    label = f"preset {found[0]} (UT conseillee {tf})" if preset else "parametres par defaut"
+
+    if p0.strategy == "drift" and fam not in (None, "GAINX") and not args.force:
+        sys.exit("La strategie drift est reservee a GainX.")
+    if p0.strategy != "drift" and fam == "GAINX" and not args.force:
+        sys.exit("GainX utilise uniquement la strategie drift.")
+
+    if preset:
+        data_tf = None if args.resample else detect_tf(name)
         if data_tf and data_tf != tf:
             print(f"ATTENTION : donnees en {data_tf} mais le preset est prevu pour {tf}. "
-                  f"Exportez les barres {tf} pour un test fidele.")
-    elif args.engine is None:
-        p.engine = "drift" if fam == "GAINX" or "painx" in sym.lower() else "trend"
-    if args.engine:
-        p.engine = args.engine
+                  f"Exportez les barres {tf} (ou changez l'UT de l'indice dans l'EA).")
 
-    print(f"Donnees : {name} — {len(df)} barres — {label} — moteur {p.engine.upper()}")
-    if p.engine == "drift":
-        print_spike_report(spike_report(df, p.spike_mult))
+    print(f"Donnees : {name} — {len(df)} barres — {label}")
+    if p0.strategy == "drift":
+        print_spike_report(spike_report(df, p0.spike_mult))
 
-    st = backtest(df, p).stats(risk)
-    print(f"\n=== Backtest {label} (risque {risk:.2f}%/trade) ===")
-    print(fmt(st))
-
-    if args.optimize:
-        optimize(df, p, risk, args.split)
+    strategies = VOL_STRATEGIES if (args.compare and p0.strategy != "drift") else (p0.strategy,)
+    for strat in strategies:
+        p = p0 if strat == p0.strategy else apply_preset(preset, strat, base)[0]
+        run_one(df, p, risk, label)
+        if args.optimize:
+            optimize(df, p, risk, args.split)
 
 
 if __name__ == "__main__":
