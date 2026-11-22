@@ -4,7 +4,7 @@ EA MetaTrader 5 pour les indices synthétiques Deriv (Volatility 10/25/50/75/100
 Il s'adapte au symbole sur lequel on l'attache : taille de lot, stops minimum et mode de remplissage sont lus depuis le symbole, pas codés en dur.
 
 > ⚠️ **À lire avant tout.** Les indices synthétiques sont générés par un algorithme aléatoire. Aucune stratégie n'y a d'avantage garanti, et cet EA ne promet aucun profit.
-> Sa « solidité » vient de la **gestion du risque** : perte bornée par trade, par jour, et un arrêt automatique en cas de drawdown.
+> Sa « solidité » vient de la **gestion du risque** : perte limitée par trade et par jour (hors gaps/spikes), et un arrêt automatique en cas de drawdown.
 > Il n'a **pas été compilé ni backtesté** dans l'environnement où il a été écrit. Compilez-le, testez-le dans le Strategy Tester, puis sur un compte **démo** pendant plusieurs semaines avant tout argent réel.
 
 ## Stratégie
@@ -25,8 +25,8 @@ Une seule position à la fois par symbole et par magic number, et uniquement à 
 | Protection | Défaut | Détail |
 |---|---|---|
 | Risque par trade | 1 % de l'equity | Lot calculé avec `OrderCalcProfit` sur la distance du SL. Si le lot minimum du symbole dépasse ce risque, le trade est **ignoré**, jamais arrondi au-dessus. |
-| Perte journalière max | 3 % | Le « jour » est le jour calendaire de l'heure serveur (GMT chez Deriv). Une fois la limite atteinte, les positions sont fermées et plus aucune entrée n'est prise jusqu'au lendemain. |
-| Drawdown max (kill switch) | 15 % depuis le pic | Ferme tout et arrête l'EA. L'état est mémorisé (variable globale `STG_KILL_<symbole>_<magic>`). Supprimez-la (F3 dans MT5) pour réarmer l'EA. |
+| Perte journalière max | 3 % | Le « jour » est le jour calendaire de l'heure serveur (GMT chez Deriv). Ce point de départ est mémorisé : changer de timeframe ou redémarrer MT5 ne réarme pas la limite. Une fois la limite atteinte, les positions sont fermées et plus aucune entrée n'est prise jusqu'au lendemain. |
+| Drawdown max (kill switch) | 15 % depuis le pic | Mesuré sur l'equity **du compte entier** (un retrait compte aussi comme drawdown), mais ne ferme que les positions de cet EA sur ce symbole. Ferme tout et arrête l'EA ; l'état survit aux redémarrages. Pour réarmer : relancez l'EA avec `InpResetGuards = true`, puis remettez-le à `false`. |
 | Filtre de spread | désactivé | `InpMaxSpreadPoints` |
 | Cooldown | 3 barres | Délai après chaque clôture de position. |
 

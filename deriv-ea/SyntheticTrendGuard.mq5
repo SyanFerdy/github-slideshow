@@ -41,6 +41,7 @@ input group "=== Divers ==="
 input ulong  InpMagic      = 20261122;   // Magic number
 input int    InpSlippage   = 50;         // Slippage max (points)
 input string InpComment    = "STG";      // Commentaire des ordres
+input bool   InpResetGuards = false;     // Réarmer : efface pic, kill switch et jour mémorisés
 
 //--- Globales
 CTrade   trade;
@@ -59,6 +60,8 @@ datetime lastCloseTime   = 0;
 
 string   gvPeak;   // variable globale terminal pour persister le pic d'equity
 string   gvKill;
+string   gvDay;
+string   gvDayEq;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -88,16 +91,38 @@ int OnInit()
 
    gvPeak = "STG_PEAK_" + _Symbol + "_" + (string)InpMagic;
    gvKill = "STG_KILL_" + _Symbol + "_" + (string)InpMagic;
+   gvDay  = "STG_DAY_"  + _Symbol + "_" + (string)InpMagic;
+   gvDayEq= "STG_DAYEQ_"+ _Symbol + "_" + (string)InpMagic;
+
+   bool persist = !MQLInfoInteger(MQL_TESTER);
+   if(persist && InpResetGuards)
+   {
+      GlobalVariableDel(gvPeak); GlobalVariableDel(gvKill);
+      GlobalVariableDel(gvDay);  GlobalVariableDel(gvDayEq);
+      Print("Protections réarmées (pic, kill switch, jour). Remettez InpResetGuards = false.");
+   }
 
    double eq = AccountInfoDouble(ACCOUNT_EQUITY);
    peakEquity = eq;
-   if(!MQLInfoInteger(MQL_TESTER))
+   killSwitch = false;
+   if(persist)
    {
       if(GlobalVariableCheck(gvPeak)) peakEquity = MathMax(eq, GlobalVariableGet(gvPeak));
       if(GlobalVariableCheck(gvKill)) killSwitch = (GlobalVariableGet(gvKill) > 0.5);
    }
 
-   ResetDay();
+   // Restaure le jour en cours (évite qu'un redémarrage réarme la limite journalière)
+   if(persist && GlobalVariableCheck(gvDay) && GlobalVariableCheck(gvDayEq) &&
+      (datetime)(long)GlobalVariableGet(gvDay) == DayOf(TimeCurrent()))
+   {
+      dayStart       = (datetime)(long)GlobalVariableGet(gvDay);
+      dayStartEquity = GlobalVariableGet(gvDayEq);
+   }
+   else
+      ResetDay();
+
+   // Pas d'entrée sur la barre en cours au démarrage
+   lastBarTime = iTime(_Symbol, _Period, 0);
    if(killSwitch) Print("Kill switch actif (drawdown max atteint précédemment). Supprimez la variable globale ", gvKill, " pour réarmer.");
    return INIT_SUCCEEDED;
 }
@@ -122,6 +147,11 @@ void ResetDay()
 {
    dayStart       = DayOf(TimeCurrent());
    dayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(!MQLInfoInteger(MQL_TESTER))
+   {
+      GlobalVariableSet(gvDay, (double)(long)dayStart);
+      GlobalVariableSet(gvDayEq, dayStartEquity);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -193,7 +223,12 @@ bool RiskGate(string &status)
          CloseAllMine();
       }
    }
-   if(killSwitch) { status = "KILL SWITCH (DD max)"; return false; }
+   if(killSwitch)
+   {
+      if(CountMyPositions() > 0) CloseAllMine();   // réessaie à chaque tick si une fermeture a échoué
+      status = "KILL SWITCH (DD max)";
+      return false;
+   }
 
    // Limite de perte journalière
    if(InpDailyLossPct > 0.0 && dayStartEquity > 0.0)
@@ -280,6 +315,7 @@ void ManagePositions(double atr)
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double minDist = MinStopDistance();
+   double minStep = MathMax(0.25 * atr, _Point);   // évite d'envoyer une modification à chaque tick
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -310,7 +346,7 @@ void ManagePositions(double atr)
             if(trail > newSL) newSL = trail;
          }
          newSL = NormalizeDouble(newSL, _Digits);
-         if(newSL > sl + _Point && newSL < bid - minDist)
+         if((sl == 0.0 || newSL >= sl + minStep || (sl < open && newSL >= open)) && newSL > sl && newSL < bid - minDist)
          {
             if(!trade.PositionModify(ticket, newSL, tp))
                Print("Echec modification BUY #", ticket, " : ", trade.ResultRetcodeDescription());
@@ -327,7 +363,7 @@ void ManagePositions(double atr)
             if(newSL == 0.0 || trail < newSL) newSL = trail;
          }
          newSL = NormalizeDouble(newSL, _Digits);
-         if((sl == 0.0 || newSL < sl - _Point) && newSL > ask + minDist)
+         if(newSL > 0.0 && (sl == 0.0 || ((newSL <= sl - minStep || (sl > open && newSL <= open)) && newSL < sl)) && newSL > ask + minDist)
          {
             if(!trade.PositionModify(ticket, newSL, tp))
                Print("Echec modification SELL #", ticket, " : ", trade.ResultRetcodeDescription());
