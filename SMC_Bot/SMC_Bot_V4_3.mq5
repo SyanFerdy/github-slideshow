@@ -1,12 +1,12 @@
 ﻿﻿//+------------------------------------------------------------------+
-//|                                                SMC_Bot_V4_2.mq5  |
+//|                                                SMC_Bot_V4_3.mq5  |
 //|   Bot SMC multi-symboles - OB 5 étoiles                          |
 //|   Sweep de liquidité + déplacement + BOS + FVG + OB vierge        |
 //|   Discount/Premium HTF, entrée à profondeur d'OB, confirmation    |
 //|   LTF, SL structurel, gestion R-Based, profils par classe d'actif |
 //+------------------------------------------------------------------+
-#property copyright "SMC Bot V4.2"
-#property version   "4.20"
+#property copyright "SMC Bot V4.3"
+#property version   "4.30"
 #property description "OB 5 étoiles : sweep de liquidité, déplacement, BOS, FVG, OB vierge, discount/premium HTF."
 #property description "Confirmation CHoCH/engulfing LTF, SL au-delà de l'extrême, place jusqu'à la liquidité opposée."
 #property description "Exécution robuste : retries, vérification SL/TP après exécution, netting, cotations figées."
@@ -157,13 +157,13 @@ input int      InpTesterMinTrades  = 100;        // Trades min pour le critère 
 //+------------------------------------------------------------------+
 void Log(const string msg)
 {
-   if(InpVerbose) Print("[SMC4.2] ", msg);
+   if(InpVerbose) Print("[SMC4.3] ", msg);
 }
 
 void Notify(const string msg)
 {
-   Print("[SMC4.2] ", msg);
-   if(InpSendPush && !MQLInfoInteger(MQL_TESTER)) SendNotification("SMC4.2 " + msg);
+   Print("[SMC4.3] ", msg);
+   if(InpSendPush && !MQLInfoInteger(MQL_TESTER)) SendNotification("SMC4.3 " + msg);
 }
 
 double NormalizePrice(const string sym, double price)
@@ -193,13 +193,6 @@ double MinStopDistance(const string sym)
    double point = SymbolInfoDouble(sym, SYMBOL_POINT);
    return MathMax((double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL),
                   (double)SymbolInfoInteger(sym, SYMBOL_TRADE_FREEZE_LEVEL)) * point;
-}
-
-// Données de l'historique synchronisées et en quantité suffisante
-bool DataReady(const string sym, ENUM_TIMEFRAMES tf, int bars)
-{
-   if(!(bool)SeriesInfoInteger(sym, tf, SERIES_SYNCHRONIZED)) return false;
-   return Bars(sym, tf) >= bars;
 }
 
 // Vrai une seule fois par nouvelle bougie. 'last' mémorise l'heure de la dernière bougie vue.
@@ -263,11 +256,24 @@ public:
       StringToUpper(s);
       if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0) return ASSET_GOLD;
       if(StringFind(s, "BTC") >= 0 || StringFind(s, "ETH") >= 0)  return ASSET_CRYPTO;
+      // Forex : devise de base ET devise de cotation fiat (évite que USDJPY soit pris pour un indice "DJ")
+      if(IsFiat(SymbolInfoString(symbol, SYMBOL_CURRENCY_BASE)) && IsFiat(SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT)) &&
+         SymbolInfoString(symbol, SYMBOL_CURRENCY_BASE) != SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT))
+         return ASSET_FOREX;
       if(StringFind(s, "US30") >= 0 || StringFind(s, "US100") >= 0 || StringFind(s, "US500") >= 0 ||
-         StringFind(s, "NAS") >= 0  || StringFind(s, "SPX") >= 0   || StringFind(s, "DJ") >= 0    ||
-         StringFind(s, "GER") >= 0  || StringFind(s, "DE40") >= 0)
+         StringFind(s, "NAS") >= 0  || StringFind(s, "SPX") >= 0   || StringFind(s, "DJ30") >= 0  ||
+         StringFind(s, "DJI") >= 0  || StringFind(s, "WS30") >= 0  || StringFind(s, "GER") >= 0   ||
+         StringFind(s, "DE40") >= 0 || StringFind(s, "DAX") >= 0)
          return ASSET_INDEX;
-      return ASSET_FOREX;
+      ENUM_SYMBOL_CALC_MODE cm = (ENUM_SYMBOL_CALC_MODE)SymbolInfoInteger(symbol, SYMBOL_TRADE_CALC_MODE);
+      if(cm == SYMBOL_CALC_MODE_FOREX || cm == SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE) return ASSET_FOREX;
+      return ASSET_INDEX;   // CFD inconnu : profil indice (plus prudent que forex)
+   }
+
+   static bool IsFiat(const string cur)
+   {
+      string list = "USD,EUR,GBP,JPY,CHF,AUD,NZD,CAD,SEK,NOK,DKK,SGD,HKD,ZAR,MXN,PLN,TRY,CNH,CZK,HUF";
+      return (StringLen(cur) == 3 && StringFind(list, cur) >= 0);
    }
 
    static void Get(const string symbol, SSymbolProfile &p)
@@ -363,30 +369,52 @@ private:
    double   m_dayStartEquity;
    int      m_dayOfYear;
    string   m_gvPeak;
+   string   m_gvDayEq;
+   string   m_gvDayId;
+   bool     m_persist;      // faux dans le testeur : chaque passe d'optimisation repart de zéro
+
+   long DayId() { return (long)(TimeCurrent() / 86400); }
 
 public:
    void Init(long magic)
    {
-      m_magic  = magic;
-      m_gvPeak = "SMC42_" + IntegerToString(magic) + "_PEAK";
+      m_magic   = magic;
+      m_persist = !MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_OPTIMIZATION);
+      m_gvPeak  = "SMC42_" + IntegerToString(magic) + "_PEAK";
+      m_gvDayEq = "SMC42_" + IntegerToString(magic) + "_DAYEQ";
+      m_gvDayId = "SMC42_" + IntegerToString(magic) + "_DAYID";
       double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+
       m_peakEquity = eq;
       double stored = 0;
-      if(!InpResetPeakEquity && GlobalVariableGet(m_gvPeak, stored) && stored > eq) m_peakEquity = stored;
-      GlobalVariableSet(m_gvPeak, m_peakEquity);
+      if(m_persist && !InpResetPeakEquity && GlobalVariableGet(m_gvPeak, stored) && stored > eq) m_peakEquity = stored;
+      if(m_persist) GlobalVariableSet(m_gvPeak, m_peakEquity);
 
+      // Equity de début de journée : conservée si l'EA redémarre dans la même journée
       MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
       m_dayOfYear      = dt.day_of_year;
       m_dayStartEquity = eq;
+      double dayId = 0, dayEq = 0;
+      if(m_persist && GlobalVariableGet(m_gvDayId, dayId) && (long)dayId == DayId() &&
+         GlobalVariableGet(m_gvDayEq, dayEq) && dayEq > 0)
+         m_dayStartEquity = dayEq;
+      SaveDay();
+   }
+
+   void SaveDay()
+   {
+      if(!m_persist) return;
+      GlobalVariableSet(m_gvDayId, (double)DayId());
+      GlobalVariableSet(m_gvDayEq, m_dayStartEquity);
    }
 
    void Update()
    {
       double eq = AccountInfoDouble(ACCOUNT_EQUITY);
       if(eq <= 0) return;
-      if(eq > m_peakEquity) { m_peakEquity = eq; GlobalVariableSet(m_gvPeak, eq); }
+      if(eq > m_peakEquity) { m_peakEquity = eq; if(m_persist) GlobalVariableSet(m_gvPeak, eq); }
       MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
-      if(dt.day_of_year != m_dayOfYear) { m_dayOfYear = dt.day_of_year; m_dayStartEquity = eq; }
+      if(dt.day_of_year != m_dayOfYear) { m_dayOfYear = dt.day_of_year; m_dayStartEquity = eq; SaveDay(); }
    }
 
    double DrawdownPct()
@@ -513,8 +541,7 @@ public:
    {
       bias = 0; rangeHigh = 0; rangeLow = 0;
       int s = MathMax(1, InpSwingStrength);
-      if(!DataReady(sym, InpHTF, 4 * s + 12)) return false;
-
+      // CopyRates déclenche lui-même le chargement de l'historique ; on juge sur le nombre reçu
       MqlRates r[];
       ArraySetAsSeries(r, false);                       // r[0] = plus ancienne
       int n = CopyRates(sym, InpHTF, 1, InpHTFLookback, r);
@@ -562,7 +589,6 @@ public:
 
       int sweepLB = MathMax(2, InpSweepLookback);
       int need    = InpMaxOBAgeBars + MathMax(InpStructureBars, sweepLB + 1) + InpDisplacementBars + 5;
-      if(!DataReady(c.symbol, InpMTF, need + 2)) return -1;
       double atr = GetATR(c);
       if(atr <= 0) return -1;
 
@@ -698,8 +724,6 @@ public:
    {
       int s    = MathMax(1, InpLTFSwingStrength);
       int need = InpConfirmMaxBars + 2 * s + 30;
-      if(!DataReady(c.symbol, InpLTF, need + 2)) return -1;
-
       MqlRates r[];
       ArraySetAsSeries(r, true);                        // r[0] = dernière bougie clôturée
       int n = CopyRates(c.symbol, InpLTF, 1, need, r);
@@ -722,7 +746,7 @@ public:
       }
 
       // 2) CHoCH : première clôture au-delà du dernier swing LTF formé pendant le retour vers l'OB
-      datetime minTime = c.touchTime - PeriodSeconds(InpLTF) * 20;
+      datetime minTime = (datetime)((long)c.touchTime - (long)PeriodSeconds(InpLTF) * 20);
       for(int i = s + 1; i < n - s; i++)
       {
          if(r[i].time < minTime) break;
@@ -775,6 +799,8 @@ public:
       m_trade.LogLevel(LOG_LEVEL_ERRORS);
       m_risk.Init(InpMagicNumber);
       m_gvPrefix    = "SMC42_" + IntegerToString(InpMagicNumber) + "_R_";
+      // Testeur : les identifiants de position recommencent à chaque passe, on purge les anciens 1R
+      if(MQLInfoInteger(MQL_TESTER)) GlobalVariablesDeleteAll(m_gvPrefix);
       m_lastCleanup = 0;
       ArrayResize(m_failTicket, 0); ArrayResize(m_failTime, 0);
 
@@ -788,10 +814,10 @@ public:
       AddSymbol(InpTradeUSDJPY, InpNameUSDJPY);
       AddSymbol(InpTradeAUDUSD, InpNameAUDUSD);
 
-      if(m_count == 0) { Print("[SMC4.2] Aucun symbole valide : vérifie les noms (suffixes broker)"); return false; }
+      if(m_count == 0) { Print("[SMC4.3] Aucun symbole valide : vérifie les noms (suffixes broker)"); return false; }
 
       ENUM_ACCOUNT_MARGIN_MODE mm = (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
-      Print("[SMC4.2] Compte ", (mm == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING ? "hedging" : "netting"),
+      Print("[SMC4.3] Compte ", (mm == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING ? "hedging" : "netting"),
             " - ", m_count, " symbole(s) actif(s)");
       return true;
    }
@@ -834,19 +860,19 @@ public:
          if(pnl >= 0) { gp[idx] += pnl; wins[idx]++; } else gl[idx] += -pnl;
       }
 
-      Print("[SMC4.2] ===== Rapport par symbole =====");
+      Print("[SMC4.3] ===== Rapport par symbole =====");
       for(int i = 0; i < m_count; i++)
       {
          double pf = (gl[i] > 0) ? gp[i] / gl[i] : (gp[i] > 0 ? 999.0 : 0.0);
          double wr = (cnt[i] > 0) ? 100.0 * wins[i] / cnt[i] : 0.0;
          string verdict = (cnt[i] < 30) ? "échantillon trop petit" : (pf >= 1.5 ? "OK" : "< 1.5");
-         Print(StringFormat("[SMC4.2] %-10s trades=%d  winrate=%.1f%%  PF=%.2f  net=%.2f  %s",
+         Print(StringFormat("[SMC4.3] %-10s trades=%d  winrate=%.1f%%  PF=%.2f  net=%.2f  %s",
                m_ctx[i].symbol, cnt[i], wr, pf, gp[i] - gl[i], verdict));
       }
    }
 
 private:
-   bool Fail(const string msg) { Print("[SMC4.2] Paramètre invalide : ", msg); return false; }
+   bool Fail(const string msg) { Print("[SMC4.3] Paramètre invalide : ", msg); return false; }
 
    bool ValidateInputs()
    {
@@ -864,6 +890,7 @@ private:
       if(InpFX_MaxSLATR <= InpMinSLATR || InpGOLD_MaxSLATR <= InpMinSLATR ||
          InpIDX_MaxSLATR <= InpMinSLATR || InpCRY_MaxSLATR <= InpMinSLATR) return Fail("SL max doit être > SL min");
       if(InpSessionStartHour < 0 || InpSessionStartHour > 23 || InpSessionEndHour < 0 || InpSessionEndHour > 24) return Fail("heures de session");
+      if(InpUseSessionFilter && InpSessionStartHour == InpSessionEndHour) return Fail("début et fin de session identiques (aucune heure autorisée)");
       if(InpFridayLastEntryHour > 24)                                    return Fail("heure limite du vendredi");
       if(InpCorrelationThreshold <= 0 || InpCorrelationThreshold > 1)    return Fail("seuil de corrélation entre 0 et 1");
       if(InpBETriggerR <= 0 || InpRLockThreshold <= 0 || InpTrailDistanceR <= 0 || InpTrailStepR < 0) return Fail("gestion R");
@@ -879,11 +906,11 @@ private:
       string sym = name;
       StringTrimLeft(sym); StringTrimRight(sym);
       if(sym == "") return;
-      if(FindContext(sym) >= 0) { Print("[SMC4.2] ", sym, " déjà ajouté, doublon ignoré"); return; }
-      if(!SymbolSelect(sym, true)) { Print("[SMC4.2] Symbole introuvable : ", sym, " (vérifie le nom/suffixe du broker)"); return; }
+      if(FindContext(sym) >= 0) { Print("[SMC4.3] ", sym, " déjà ajouté, doublon ignoré"); return; }
+      if(!SymbolSelect(sym, true)) { Print("[SMC4.3] Symbole introuvable : ", sym, " (vérifie le nom/suffixe du broker)"); return; }
 
       int handle = iATR(sym, InpMTF, InpATRPeriod);
-      if(handle == INVALID_HANDLE) { Print("[SMC4.2] Impossible de créer l'ATR pour ", sym); return; }
+      if(handle == INVALID_HANDLE) { Print("[SMC4.3] Impossible de créer l'ATR pour ", sym); return; }
 
       int idx = m_count;
       ArrayResize(m_ctx, m_count + 1);
@@ -899,7 +926,7 @@ private:
       CopyRates(sym, InpMTF, 0, InpMaxOBAgeBars + 50, tmp);
       CopyRates(sym, InpLTF, 0, 100, tmp);
 
-      Print(StringFormat("[SMC4.2] %s ajouté - profil %s : RR=%.1f, marge SL=%.2f ATR, SL %.1f-%.1f ATR, spread max=%.0f%% du SL, session=%s",
+      Print(StringFormat("[SMC4.3] %s ajouté - profil %s : RR=%.1f, marge SL=%.2f ATR, SL %.1f-%.1f ATR, spread max=%.0f%% du SL, session=%s",
             sym, CProfileManager::ClassName(m_ctx[idx].profile.assetClass), m_ctx[idx].profile.rewardRatio,
             m_ctx[idx].profile.slBufferATR, m_ctx[idx].profile.minSLATR, m_ctx[idx].profile.maxSLATR,
             m_ctx[idx].profile.maxSpreadPct, (m_ctx[idx].profile.useSession ? "oui" : "non")));
@@ -1072,16 +1099,17 @@ private:
       string curs[2];
       curs[0] = SymbolInfoString(c.symbol, SYMBOL_CURRENCY_BASE);
       curs[1] = SymbolInfoString(c.symbol, SYMBOL_CURRENCY_PROFIT);
-      datetime from = now - InpNewsMinutesAfter * 60;
-      datetime to   = now + InpNewsMinutesBefore * 60;
+      datetime from = (datetime)((long)now - (long)InpNewsMinutesAfter * 60);
+      datetime to   = (datetime)((long)now + (long)InpNewsMinutesBefore * 60);
 
       for(int k = 0; k < 2; k++)
       {
          if(curs[k] == "" || (k == 1 && curs[1] == curs[0])) continue;
          MqlCalendarValue vals[];
          ResetLastError();
-         int got = CalendarValueHistory(vals, from, to, NULL, curs[k]);
-         if(got < 0) { Log(StringFormat("%s : calendrier indisponible (erreur %d)", c.symbol, GetLastError())); continue; }
+         CalendarValueHistory(vals, from, to, NULL, curs[k]);
+         int got = ArraySize(vals);                  // indépendant du type de retour de la fonction
+         if(got == 0 && GetLastError() != 0) { Log(StringFormat("%s : calendrier indisponible (erreur %d)", c.symbol, GetLastError())); continue; }
          for(int i = 0; i < got; i++)
          {
             MqlCalendarEvent ev;
@@ -1211,7 +1239,7 @@ private:
       string sym = c.symbol;
       int    dir = c.ob.direction;
       m_trade.SetTypeFillingBySymbol(sym);
-      string comment = StringFormat("SMC4.2 %s RR%.1f", dir == 1 ? "BUY" : "SELL", c.profile.rewardRatio);
+      string comment = StringFormat("SMC4.3 %s RR%.1f", dir == 1 ? "BUY" : "SELL", c.profile.rewardRatio);
 
       for(int attempt = 1; attempt <= InpOrderRetries; attempt++)
       {
