@@ -15,23 +15,77 @@
 | `mt5/ExportBars.mq5` | Script qui exporte l'historique d'un graphique en CSV |
 | `backtest/syntx_backtest.py` | Backtester Python : analyse des pics, backtest, optimisation avec validation hors échantillon |
 
+## Indices autorisés
+
+Le bot ne trade **que** les indices suivants. Il refuse de démarrer sur tous
+les autres (PainX, FX Vol 80/99, FlipX, BreakX…), jugés trop volatils.
+
+- **FX Vol 20, 40, 60** et **SFX Vol 20, 40, 60** : moteur TREND.
+- **GainX 400, 600, 800, 999, 1200** : moteur DRIFT.
+
+L'indice est reconnu à partir du nom du symbole (`FX Vol 40`, `SFX Vol 20`,
+`GainX 999`…).
+
 ## Les deux moteurs
 
-**DRIFT (GainX / PainX).** Ces indices dérivent lentement dans un sens et font
-des pics brutaux dans l'autre, en moyenne tous les N ticks (400, 600, 800,
-999, 1200). Le bot :
-
-- détecte lui-même le sens des pics à partir des données, sans le coder en dur ;
-- trade dans le sens de la dérive, confirmé par une EMA ;
-- place son stop et son objectif en multiples de la taille moyenne d'un pic ;
-- ferme la position après un nombre maximal de barres.
-
-**TREND (FX Vol, SFX Vol, TrendX…).** Le bot entre sur un croisement d'EMA
+**TREND (FX Vol / SFX Vol).** Le bot entre sur un croisement d'EMA
 rapide/lente filtré par l'ADX. Le stop et l'objectif sont en ATR, avec un
 trailing stop.
 
-Le mode `Auto` choisit DRIFT si le symbole contient « GainX » ou « PainX »,
-et TREND sinon.
+**DRIFT (GainX).** GainX monte lentement puis chute par pics brutaux, en
+moyenne tous les N ticks. Le bot :
+
+- trade dans le sens de la dérive (à l'achat), confirmé par une EMA ;
+- place son stop et son objectif en multiples de la taille moyenne d'un pic ;
+- ferme la position après un nombre maximal de barres ;
+- **par sécurité, ne trade pas** si les données montrent des pics haussiers,
+  c'est-à-dire si l'indice ne se comporte pas comme un GainX.
+
+## Préréglages par indice
+
+Chaque indice a son propre jeu de paramètres, chargé automatiquement
+(`InpUsePresets = true`). Le risque effectif d'un trade est le risque de base
+(`InpRiskPercent`, 0,5 % par défaut) multiplié par le coefficient de risque.
+
+**FX Vol / SFX Vol (TREND)**
+
+| Indice | UT | Risque | EMA rapide / lente | ADX min | Stop | Objectif | Trailing |
+|---|---|---|---|---|---|---|---|
+| FX Vol 20  | M15 | ×1,0 | 20 / 100 | 20 | 2,0 ATR | 4,0 ATR | 2,5 ATR |
+| FX Vol 40  | M5  | ×1,0 | 20 / 100 | 22 | 2,2 ATR | 4,0 ATR | 2,5 ATR |
+| FX Vol 60  | M5  | ×0,8 | 30 / 150 | 25 | 2,5 ATR | 4,5 ATR | 3,0 ATR |
+| SFX Vol 20 | M15 | ×1,0 | 20 / 120 | 22 | 2,2 ATR | 4,0 ATR | 2,8 ATR |
+| SFX Vol 40 | M5  | ×0,8 | 25 / 150 | 25 | 2,5 ATR | 4,5 ATR | 3,0 ATR |
+| SFX Vol 60 | M5  | ×0,6 | 30 / 200 | 28 | 3,0 ATR | 5,0 ATR | 3,5 ATR |
+
+**GainX (DRIFT, en M1)**
+
+| Indice | Risque | Barres analysées | EMA | Attente après pic | Stop | Objectif | Sortie après |
+|---|---|---|---|---|---|---|---|
+| GainX 400  | ×0,7 | 2000 | 30 | 2 barres | 1,3 pic | 0,5 pic | 30 barres |
+| GainX 600  | ×0,8 | 2500 | 40 | 3 barres | 1,2 pic | 0,6 pic | 45 barres |
+| GainX 800  | ×0,9 | 3000 | 50 | 3 barres | 1,2 pic | 0,6 pic | 60 barres |
+| GainX 999  | ×1,0 | 3500 | 50 | 4 barres | 1,2 pic | 0,6 pic | 80 barres |
+| GainX 1200 | ×1,0 | 4000 | 60 | 4 barres | 1,1 pic | 0,7 pic | 100 barres |
+
+La logique de ces réglages :
+
+- **Plus l'indice est volatil** (60 > 40 > 20, et SFX que je suppose plus
+  agité que FX), plus les tendances doivent être confirmées (EMA plus
+  longues, ADX plus élevé), plus les stops sont larges et plus le risque par
+  trade est réduit.
+- **Les indices à 20** bougent peu : le spread pèse plus lourd par rapport au
+  mouvement. On travaille donc en M15 pour viser des mouvements plus grands.
+- **Les GainX à pics fréquents** (400) imposent des positions plus courtes et
+  un risque plus faible. Les GainX à pics rares (1200) laissent plus de temps
+  à la dérive.
+
+> **Important :** ces valeurs sont des **points de départ raisonnés**, pas
+> des réglages validés. Je n'ai pas encore eu accès aux vraies données
+> Weltrade, et la nature exacte de SFX Vol n'est pas documentée publiquement.
+> Validez chaque préréglage avec `--optimize` sur les données de l'indice
+> concerné, puis ajustez-le dans `LoadPreset()` (EA) et `PRESETS` (Python).
+> Pour régler tout à la main, passez `InpUsePresets = false`.
 
 ## Gestion du risque (intégrée, non désactivable)
 
@@ -56,17 +110,23 @@ et TREND sinon.
    **« Chaque tick basé sur des ticks réels »**. C'est le seul mode qui
    reproduit correctement les pics qui sautent par-dessus le stop.
 2. **Backtester Python** sur les vraies données Weltrade :
-   - Ouvrez un graphique M1 (par exemple GainX 999) et faites défiler l'historique.
+   - Ouvrez un graphique de l'indice **dans l'UT de son préréglage** (M1 pour
+     GainX, M5 ou M15 pour FX/SFX Vol) et faites défiler l'historique.
    - Lancez le script `ExportBars` : le CSV est écrit dans `MQL5/Files/`.
    - Puis :
 
    ```bash
    pip install pandas numpy
    # Analyse des pics + backtest avec les paramètres par défaut
-   python backtest/syntx_backtest.py GainX_999_M1.csv --engine drift --point 0.01
+   python backtest/syntx_backtest.py GainX_999_M1.csv --point 0.01
+   python backtest/syntx_backtest.py FX_Vol_40_M5.csv --point 0.01
    # Optimisation + vérification sur des données jamais vues
-   python backtest/syntx_backtest.py GainX_999_M1.csv --engine drift --point 0.01 --optimize
+   python backtest/syntx_backtest.py SFX_Vol_20_M15.csv --point 0.01 --optimize
    ```
+
+   Le préréglage est choisi d'après le nom du fichier. Si le nom ne
+   contient pas l'indice, ajoutez `--symbol "FX Vol 40"`. Un avertissement
+   s'affiche si l'UT des données ne correspond pas à celle du préréglage.
 
    `--point` correspond à la taille du point du symbole (affichée par
    `ExportBars`). Il sert à convertir le spread réel en prix.

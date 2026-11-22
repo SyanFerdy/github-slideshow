@@ -29,6 +29,8 @@ from __future__ import annotations
 import argparse
 import itertools
 import math
+import os
+import re
 import sys
 from dataclasses import dataclass, field
 
@@ -204,6 +206,8 @@ class Params:
     sl_atr: float = 2.0
     tp_atr: float = 4.0
     trail_atr: float = 2.5
+    # securite : sens de derive attendu (+1 GainX, 0 = pas de controle)
+    expected_drift: int = 0
 
 
 @dataclass
@@ -249,6 +253,8 @@ def _prepare(df: pd.DataFrame, p: Params) -> dict:
         absum = spike_body.abs().rolling(p.lookback, min_periods=200).sum()
         avg_spike = (absum / cnt.replace(0, np.nan)).fillna(0)
         drift_dir = np.where(cnt >= p.min_spikes, np.where(signed > 0, -1, 1), 0)
+        if p.expected_drift:
+            drift_dir = np.where(drift_dir == p.expected_drift, drift_dir, 0)
         # barres ecoulees depuis le dernier pic
         grp = is_spike.cumsum()
         since = df.groupby(grp).cumcount().to_numpy()
@@ -343,6 +349,59 @@ def fmt(st: dict) -> str:
             f"rendement={st['return_pct']:+8.1f}%  maxDD={st['max_dd_pct']:5.1f}%")
 
 
+# --------------------------------------------------------------------------
+# Presets par indice (identiques a ceux de SyntX_Guardian.mq5)
+# --------------------------------------------------------------------------
+# Seuls ces indices sont autorises ; les autres sont juges trop volatils.
+# Ces valeurs sont des POINTS DE DEPART a valider avec --optimize.
+_T = "trend"
+PRESETS: dict[tuple[str, int], dict] = {
+    #                 UT     risque  fast slow  ADX   SL   TP   trail
+    ("FXVOL", 20):  dict(engine=_T, tf="M15", risk_mult=1.0, fast=20, slow=100, adx_min=20, sl_atr=2.0, tp_atr=4.0, trail_atr=2.5),
+    ("FXVOL", 40):  dict(engine=_T, tf="M5",  risk_mult=1.0, fast=20, slow=100, adx_min=22, sl_atr=2.2, tp_atr=4.0, trail_atr=2.5),
+    ("FXVOL", 60):  dict(engine=_T, tf="M5",  risk_mult=0.8, fast=30, slow=150, adx_min=25, sl_atr=2.5, tp_atr=4.5, trail_atr=3.0),
+    ("SFXVOL", 20): dict(engine=_T, tf="M15", risk_mult=1.0, fast=20, slow=120, adx_min=22, sl_atr=2.2, tp_atr=4.0, trail_atr=2.8),
+    ("SFXVOL", 40): dict(engine=_T, tf="M5",  risk_mult=0.8, fast=25, slow=150, adx_min=25, sl_atr=2.5, tp_atr=4.5, trail_atr=3.0),
+    ("SFXVOL", 60): dict(engine=_T, tf="M5",  risk_mult=0.6, fast=30, slow=200, adx_min=28, sl_atr=3.0, tp_atr=5.0, trail_atr=3.5),
+}
+_GAINX = {  # niveau: (risque, lookback, EMA, cooldown, SL pic, TP pic, barres max)
+    400:  (0.7, 2000, 30, 2, 1.3, 0.5, 30),
+    600:  (0.8, 2500, 40, 3, 1.2, 0.6, 45),
+    800:  (0.9, 3000, 50, 3, 1.2, 0.6, 60),
+    999:  (1.0, 3500, 50, 4, 1.2, 0.6, 80),
+    1200: (1.0, 4000, 60, 4, 1.1, 0.7, 100),
+}
+for _lvl, (_r, _lb, _e, _cd, _sl, _tp, _mb) in _GAINX.items():
+    PRESETS[("GAINX", _lvl)] = dict(engine="drift", tf="M1", risk_mult=_r, lookback=_lb, drift_ema=_e,
+                                    cooldown=_cd, sl_spike=_sl, tp_spike=_tp, max_bars=_mb,
+                                    expected_drift=1)
+
+
+def detect_index(name: str) -> tuple[str | None, int | None]:
+    """Identifie l'indice a partir d'un nom de symbole ou de fichier."""
+    s = re.sub(r"[\s._\-]", "", os.path.basename(name).upper())
+    for fam in ("SFXVOL", "FXVOL", "GAINX"):   # SFX avant FX (SFXVOL contient FXVOL)
+        m = re.search(fam + r"(\d+)?", s)
+        if m:
+            return fam, int(m.group(1)) if m.group(1) else None
+    return None, None
+
+
+def find_preset(fam: str | None, level: int | None) -> tuple[str, dict] | None:
+    if fam == "GAINX":
+        lvl = min(_GAINX, key=lambda k: abs(k - (level or 999)))
+        return f"GainX {lvl}", PRESETS[("GAINX", lvl)]
+    if (fam, level) in PRESETS:
+        label = {"FXVOL": "FX Vol", "SFXVOL": "SFX Vol"}[fam]
+        return f"{label} {level}", PRESETS[(fam, level)]
+    return None
+
+
+def detect_tf(name: str) -> str | None:
+    m = re.search(r"(?:^|[_\-. ])(M1|M5|M15|M30|H1|H4)(?:[_\-. ]|$)", os.path.basename(name).upper())
+    return m.group(1) if m else None
+
+
 def optimize(df: pd.DataFrame, base: Params, risk_pct: float, split: float) -> None:
     """Recherche en grille sur l'echantillon d'apprentissage, puis verification hors echantillon."""
     cut = int(len(df) * split)
@@ -378,14 +437,18 @@ def optimize(df: pd.DataFrame, base: Params, risk_pct: float, split: float) -> N
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv", nargs="?", help="CSV de barres exporte de MT5")
+    ap.add_argument("--symbol", help="nom de l'indice (sinon deduit du nom du fichier), ex. 'FX Vol 40'")
     ap.add_argument("--simulate", choices=["gainx", "painx", "fxvol"], help="utiliser des donnees simulees")
     ap.add_argument("--bars", type=int, default=150_000)
     ap.add_argument("--edge", type=float, default=0.0, help="biais artificiel dans la simulation")
-    ap.add_argument("--engine", choices=["drift", "trend", "auto"], default="auto")
+    ap.add_argument("--engine", choices=["drift", "trend"], help="forcer le moteur (sinon celui du preset)")
+    ap.add_argument("--no-preset", action="store_true", help="ignorer le preset de l'indice")
+    ap.add_argument("--force", action="store_true", help="autoriser un indice hors liste (deconseille)")
     ap.add_argument("--spread", type=float, default=0.0, help="spread en unites de prix")
     ap.add_argument("--point", type=float, default=0.0,
                     help="taille du point : utilise la colonne SPREAD (en points) convertie en prix")
-    ap.add_argument("--risk", type=float, default=0.5, help="risque par trade en %% (pour la courbe d'equity)")
+    ap.add_argument("--risk", type=float, default=0.5,
+                    help="risque de base par trade en %% (module par le preset)")
     ap.add_argument("--spike-mult", type=float, default=6.0)
     ap.add_argument("--spike-slippage", type=float, default=1.0,
                     help="part du depassement d'un pic perdue au-dela du SL (1.0 = realiste, 0 = optimiste)")
@@ -396,11 +459,19 @@ def main() -> None:
     if args.simulate:
         df = simulate(args.simulate, args.bars, edge=args.edge)
         name = f"simulation {args.simulate} (biais={args.edge})"
+        sym = args.symbol or {"gainx": "GainX 999", "fxvol": "FX Vol 40", "painx": "PainX"}[args.simulate]
     elif args.csv:
         df = load_csv(args.csv)
         name = args.csv
+        sym = args.symbol or args.csv
     else:
         ap.error("fournir un CSV ou --simulate")
+
+    fam, level = detect_index(sym)
+    found = find_preset(fam, level)
+    if found is None and not (args.force or args.simulate):
+        sys.exit(f"'{sym}' n'est pas dans la liste autorisee (FX Vol / SFX Vol 20-40-60, GainX). "
+                 "Utilisez --symbol si le nom du fichier ne contient pas l'indice, ou --force.")
 
     if "spread" in df.columns:
         if args.point > 0 and args.spread <= 0:
@@ -408,23 +479,36 @@ def main() -> None:
         else:
             df = df.drop(columns="spread")
 
-    engine = args.engine
-    if engine == "auto":
-        low = name.lower()
-        engine = "drift" if ("gainx" in low or "painx" in low) else "trend"
+    p = Params(spread=args.spread, spike_mult=args.spike_mult, spike_slippage=args.spike_slippage)
+    risk = args.risk
+    label = "parametres par defaut"
+    if found and not args.no_preset:
+        label, preset = found
+        preset = dict(preset)
+        tf = preset.pop("tf")
+        risk = args.risk * preset.pop("risk_mult")
+        for k, v in preset.items():
+            setattr(p, k, v)
+        label = f"preset {label} (UT conseillee {tf})"
+        data_tf = detect_tf(name)
+        if data_tf and data_tf != tf:
+            print(f"ATTENTION : donnees en {data_tf} mais le preset est prevu pour {tf}. "
+                  f"Exportez les barres {tf} pour un test fidele.")
+    elif args.engine is None:
+        p.engine = "drift" if fam == "GAINX" or "painx" in sym.lower() else "trend"
+    if args.engine:
+        p.engine = args.engine
 
-    print(f"Donnees : {name} — {len(df)} barres — moteur {engine.upper()}")
-    rep = spike_report(df, args.spike_mult)
-    print_spike_report(rep)
+    print(f"Donnees : {name} — {len(df)} barres — {label} — moteur {p.engine.upper()}")
+    if p.engine == "drift":
+        print_spike_report(spike_report(df, p.spike_mult))
 
-    p = Params(engine=engine, spread=args.spread, spike_mult=args.spike_mult,
-               spike_slippage=args.spike_slippage)
-    st = backtest(df, p).stats(args.risk)
-    print(f"\n=== Backtest avec les parametres par defaut (risque {args.risk}%/trade) ===")
+    st = backtest(df, p).stats(risk)
+    print(f"\n=== Backtest {label} (risque {risk:.2f}%/trade) ===")
     print(fmt(st))
 
     if args.optimize:
-        optimize(df, p, args.risk, args.split)
+        optimize(df, p, risk, args.split)
 
 
 if __name__ == "__main__":
