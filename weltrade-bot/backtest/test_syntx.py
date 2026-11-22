@@ -60,7 +60,7 @@ def test_gainx_presets_match_ea():
 
 def test_calibration_keys_understood_by_ea():
     src = ea_source()
-    body = src[src.index("bool SetCalibratedValue"):src.index("bool ApplyCalibration")]
+    body = src[src.index("bool SetCalibratedValue"):src.index("int ApplyCalibration")]
     ea_keys = set(re.findall(r'key == "(\w+)"', body)) | {"enabled"}
     assert ea_keys == set(sb.OVERRIDE_KEYS)
 
@@ -122,3 +122,21 @@ def test_spread_filter_blocks_trades():
     n_ok = len(sb.backtest(df, p).trades)
     p_wide, _, _ = sb.apply_preset(sb.PRESETS[("FXVOL", 40)], "breakout", sb.Params(spread=1e6))
     assert n_ok > 0 and len(sb.backtest(df, p_wide).trades) == 0
+
+
+def test_daily_trade_cap_matches_ea():
+    """Comme l'EA : jamais plus de max_trades_per_day entrees par jour."""
+    df = sb.simulate("gainx", 20000, seed=6)
+    p, _, _ = sb.apply_preset(sb.PRESETS[("GAINX", 400)], None, sb.Params(max_trades_per_day=5))
+    res = sb.backtest(df, p)
+    days = df["time"].dt.normalize().to_numpy()
+    per_day = {}
+    for entry_i, *_ in res.trades:
+        per_day[days[entry_i]] = per_day.get(days[entry_i], 0) + 1
+    assert per_day and max(per_day.values()) <= 5
+
+
+def test_overrides_file_uses_crlf(tmp_path):
+    path = tmp_path / sb.PRESET_FILE
+    sb.write_overrides(str(path), [("GainX 999", "enabled", 1)])
+    assert open(path, "rb").read().count(b"\r\n") == 2

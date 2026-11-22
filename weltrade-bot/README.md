@@ -15,6 +15,7 @@
 | `backtest/calibrate.py` | **Calibration** : choisit, pour chaque indice, l'unité de temps, la stratégie et les réglages sur vos données, et désactive les indices sans avantage |
 | `backtest/syntx_backtest.py` | Backtester : comparaison des stratégies, optimisation, verdict automatique |
 | `backtest/analyze_trades.py` | Analyse du journal de trades de l'EA (phase démo puis réel) |
+| `backtest/check_indicators.py` | Vérifie que le backtester calcule les indicateurs exactement comme MT5 |
 | `backtest/test_syntx.py` | Tests automatiques (cohérence EA/Python, absence de triche sur le futur, etc.) |
 
 ## Nouveautés de la v2.1
@@ -28,20 +29,31 @@ qui a fait ses preuves, avec les réglages propres à chaque indice.
   jamais vue. L'indice est activé seulement s'il passe tous les seuils.
 - **Les caractéristiques réelles de chaque indice** (spread, swap, distances
   minimales, lots) sont exportées depuis MT5 et prises en compte dans les tests.
-- **Le backtest reproduit maintenant exactement l'EA** :
+- **Le backtest suit l'EA au plus près** :
   - ADX de Wilder des deux côtés ; ATR en moyenne simple, comme MT5 ;
   - trailing stop une fois par barre ;
   - swap à chaque nuit ;
-  - même filtre de spread.
-
-  Un réglage validé en backtest est donc bien celui que l'EA appliquera.
+  - même filtre de spread ;
+  - même plafond de 20 trades par jour.
+- **La parité des indicateurs se vérifie** avec `check_indicators.py`, qui
+  compare les valeurs calculées par MT5 lui-même à celles du backtester.
+- **Écarts connus restants** :
+  - l'EA place stop et objectif à partir du prix d'exécution (ask/bid), le
+    backtester à partir de l'ouverture de la barre ;
+  - le plafond de risque total et la perte journalière, qui portent sur tout
+    le portefeuille, ne sont pas simulés.
+- **Les indices non calibrés ne tradent pas sur un compte réel.** Sur compte
+  réel, un indice absent du fichier de calibration est refusé
+  (`InpRequireCalibReal`). En démo et dans le testeur, il trade avec les
+  préréglages intégrés, avec un avertissement.
 
 **Robustesse.**
 
 - **État de risque propre à chaque compte.** Un compte démo et un compte
   réel sur le même terminal ne partagent plus le coupe-circuit.
-- **Dépôts et retraits pris en compte** : un retrait ne déclenche plus le
-  coupe-circuit.
+- **Dépôts et retraits pris en compte** : l'equity est suivie nette des
+  dépôts et retraits (lus dans l'historique du compte). Un retrait ne
+  déclenche donc jamais le coupe-circuit.
 - **Contrôles avant chaque ordre** :
   - mode de trading du symbole (fermé, achat seul…) ;
   - distances minimales et niveau de gel du broker ;
@@ -186,12 +198,16 @@ caractéristiques réelles dans *Dossier commun → Files → SyntX_data*.
 (Dossier commun : *Fichier → Ouvrir le dossier des données*, remonter d'un
 niveau, puis *Common*.)
 
-### 3. Calibrer
+### 3. Vérifier les indicateurs, puis calibrer
 
 ```bash
 pip install pandas numpy
+python backtest/check_indicators.py "<Dossier commun>/Files/SyntX_data"
 python backtest/calibrate.py "<Dossier commun>/Files/SyntX_data"
 ```
+
+**Si `check_indicators.py` signale un écart, envoyez-moi le résultat avant
+de calibrer** : le backtest ne correspondrait pas à l'EA.
 
 Pour chaque indice, le script affiche :
 - les essais sur la période d'apprentissage ;
@@ -200,7 +216,13 @@ Pour chaque indice, le script affiche :
 - la décision **ACTIVE** ou **DESACTIVE**.
 
 Il écrit `SyntX_Guardian_presets.csv` : copiez-le dans *Dossier commun → Files*.
-Un indice sans données ou sans avantage validé est désactivé.
+Un indice sans données ou sans avantage validé est désactivé. Une unité de
+temps dont l'historique est trop court pour atteindre 100 trades sur la
+période de test est écartée : exportez plus d'historique si besoin.
+
+Le plafond de 20 trades par jour s'applique aussi à la calibration. Si vous
+changez `InpMaxTradesPerDay` dans l'EA, passez la même valeur à
+`calibrate.py --max-trades-day`.
 
 Pour explorer un indice à la main :
 

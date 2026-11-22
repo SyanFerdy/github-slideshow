@@ -109,6 +109,7 @@ def calibrate_index(label: str, fam: str, level: int, files: list[str], spec: di
                        f"(conseille >= {MIN_DAYS.get(tf or '', 365)}) -> resultats peu fiables")
         ref_price = float(df["close"].median())
         base = sb.Params(spread=spread, spike_slippage=args.spike_slippage,
+                         max_trades_per_day=args.max_trades_day,
                          swap_long=swap_in_price(spec, "long", ref_price) if spec else 0.0,
                          swap_short=swap_in_price(spec, "short", ref_price) if spec else 0.0)
         cut = int(len(df) * args.split)
@@ -121,6 +122,13 @@ def calibrate_index(label: str, fam: str, level: int, files: list[str], spec: di
                 log.append(f"  {tf:>3} {strat:<9} : pas assez de trades en apprentissage")
                 continue
             log.append(f"  {tf:>3} {strat:<9} apprentissage : {sb.fmt(st_in)}")
+            # Le test final doit pouvoir atteindre le minimum de trades exige,
+            # sinon il est "gache" : l'indice serait desactive quel que soit son avantage.
+            projected = st_in["trades"] * (1 - args.split) / args.split
+            if projected < sb.CRITERIA["trades"][0]:
+                log.append(f"      ecarte : ~{projected:.0f} trades attendus sur le test final "
+                           f"(minimum {sb.CRITERIA['trades'][0]}) -> historique trop court pour cette UT")
+                continue
             if best is None or st_in["t_stat"] > best[0]:
                 best = (st_in["t_stat"], p, tf, df, risk, st_in)
 
@@ -151,6 +159,7 @@ def main() -> None:
     ap.add_argument("--split", type=float, default=0.7, help="part d'apprentissage (le reste = test final)")
     ap.add_argument("--spread", type=float, default=0.0, help="forcer un spread en unites de prix")
     ap.add_argument("--spike-slippage", type=float, default=1.0)
+    ap.add_argument("--max-trades-day", type=int, default=20, help="doit egaler InpMaxTradesPerDay de l'EA")
     ap.add_argument("--keep-failed", action="store_true",
                     help="ecrire les reglages des indices non valides (ils restent desactives)")
     args = ap.parse_args()

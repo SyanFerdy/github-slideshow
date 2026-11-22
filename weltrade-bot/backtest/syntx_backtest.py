@@ -32,6 +32,7 @@ Modele d'execution (neutre, sans biais volontaire) :
   - stop et objectif touches dans la meme barre -> le plus proche de
     l'ouverture est suppose touche en premier ;
   - trade ignore si le spread depasse 10 % du stop (comme l'EA) ;
+  - au plus 20 trades par jour (comme l'EA, --max-trades-day) ;
   - swap applique a chaque nuit passee en position (--swap-long/--swap-short) ;
   - indicateurs calcules comme MT5 (ATR = moyenne simple, ADX de Wilder) ;
   - DRIFT : quand un pic traverse le stop, le depassement est perdu
@@ -236,6 +237,7 @@ class Params:
     spike_slippage: float = 1.0
     max_spread_sl_ratio: float = 0.10  # comme l'EA : trade ignore si spread > 10 % du stop
     swap_long: float = 0.0             # swap par nuit en unites de prix (+ = credit)
+    max_trades_per_day: int = 20       # comme l'EA (InpMaxTradesPerDay), 0 = illimite
     swap_short: float = 0.0
     expected_drift: int = 0          # +1 pour GainX (securite)
     max_bars: int = 0                # sortie temporelle (drift, meanrev)
@@ -358,7 +360,8 @@ def apply_overrides(preset: dict, overrides: dict[str, str]) -> dict:
 
 
 def write_overrides(path: str, rows: list[tuple[str, str, object]]) -> None:
-    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+    # Fins de ligne Windows (CRLF) : format attendu par la lecture CSV de MT5
+    with open(path, "w", encoding="ascii", newline="\r\n") as fh:
         fh.write("index,key,value\n")
         for name, key, val in rows:
             if key not in OVERRIDE_KEYS:
@@ -529,6 +532,7 @@ def backtest(df: pd.DataFrame, p: Params) -> Result:
     start = max(start, 2)
 
     day = d["day"]
+    trades_today, today = 0, None
     pos = 0
     entry = sl = tp = sl_d = cost = 0.0
     opened = 0
@@ -552,7 +556,13 @@ def backtest(df: pd.DataFrame, p: Params) -> Result:
             sig, sdist, tdist = _entry(d, p, i)
             if sig != 0 and p.max_spread_sl_ratio > 0 and spr[i + 1] > p.max_spread_sl_ratio * sdist:
                 sig = 0   # spread trop eleve par rapport au stop (meme filtre que l'EA)
+            if sig != 0 and p.max_trades_per_day > 0:
+                if day[i + 1] != today:
+                    today, trades_today = day[i + 1], 0
+                if trades_today >= p.max_trades_per_day:
+                    sig = 0   # plafond journalier de l'EA atteint
             if sig != 0 and sdist > 0:
+                trades_today += 1
                 pos, sl_d, opened = sig, sdist, i + 1
                 entry, cost = o[i + 1], spr[i + 1]
                 sl = entry - pos * sdist
@@ -730,6 +740,7 @@ def main() -> None:
     ap.add_argument("--split", type=float, default=0.7, help="part d'apprentissage pour --optimize")
     ap.add_argument("--max-spread-ratio", type=float, default=0.10,
                     help="trade ignore si spread > X fois la distance du stop (comme l'EA)")
+    ap.add_argument("--max-trades-day", type=int, default=20, help="plafond journalier (comme l'EA)")
     ap.add_argument("--swap-long", type=float, default=0.0, help="swap par nuit, achat (unites de prix, + = credit)")
     ap.add_argument("--swap-short", type=float, default=0.0, help="swap par nuit, vente (unites de prix)")
     ap.add_argument("--presets", help="fichier de calibration SyntX_Guardian_presets.csv a appliquer")
@@ -764,7 +775,8 @@ def main() -> None:
     default_strat = None if preset else ("drift" if fam == "GAINX" or "painx" in sym.lower() else "ema_cross")
     base = Params(spread=args.spread, spike_slippage=args.spike_slippage,
                   max_spread_sl_ratio=args.max_spread_ratio,
-                  swap_long=args.swap_long, swap_short=args.swap_short)
+                  swap_long=args.swap_long, swap_short=args.swap_short,
+                  max_trades_per_day=args.max_trades_day)
     if args.presets and found:
         overrides = load_overrides(args.presets).get(found[0].lower())
         if overrides:

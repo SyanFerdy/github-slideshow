@@ -29,7 +29,7 @@
 //|  Aucun resultat n'est garanti. Testez sur compte demo.          |
 //+------------------------------------------------------------------+
 #property copyright "SyntX Guardian"
-#property version   "2.10"
+#property version   "2.11"
 
 #include <Trade\Trade.mqh>
 
@@ -61,7 +61,8 @@ enum ENUM_FAMILY
 //=== General
 input group "=== General ==="
 input bool   InpUsePresets        = true;      // Utiliser le preset de l'indice (recommande)
-input bool   InpUseCalibration    = true;      // Lire le fichier de calibration (si present)
+input bool   InpUseCalibration    = true;      // Lire le fichier de calibration
+input bool   InpRequireCalibReal  = true;      // Compte reel : refuser un indice non calibre
 input bool   InpAllowOtherSymbols = false;     // Autoriser les indices hors liste (deconseille)
 input long   InpMagic             = 26112201;  // Numero magique (le MEME sur tous les graphiques)
 input bool   InpLogTrades         = true;      // Ecrire le journal des trades (CSV)
@@ -185,6 +186,9 @@ int      hDriftEMA = INVALID_HANDLE, hFast = INVALID_HANDLE, hSlow = INVALID_HAN
 int      hADX = INVALID_HANDLE, hATR = INVALID_HANDLE, hBB = INVALID_HANDLE, hRSI = INVALID_HANDLE;
 datetime g_lastBar      = 0;
 ulong    g_pendingClose = 0;   // position a fermer (nouvel essai a chaque tick)
+double   g_lastBalance  = -1.0;  // solde lors du dernier calcul des depots
+double   g_netDeposits  = 0.0;   // depots - retraits (historique du compte)
+bool     g_riskSynced   = false; // historique coherent avec le solde
 
 //--- Statistiques de pics (DRIFT)
 int    g_driftDir = 0, g_spikeCount = 0, g_barsSinceSpike = 0;
@@ -369,6 +373,7 @@ bool TFFromString(string s, ENUM_TIMEFRAMES &tf)
    return false;
   }
 
+//--- Valide PUIS applique : une valeur refusee ne modifie rien.
 bool SetCalibratedValue(const string key, const string val)
   {
    double d = StringToDouble(val);
@@ -382,7 +387,7 @@ bool SetCalibratedValue(const string key, const string val)
      }
    if(key == "strategy")
      {
-      ENUM_STRATEGY s;
+      ENUM_STRATEGY s = STRAT_EMA_CROSS;
       if(val == "ema_cross")     s = STRAT_EMA_CROSS;
       else if(val == "breakout") s = STRAT_BREAKOUT;
       else if(val == "meanrev")  s = STRAT_MEANREV;
@@ -395,47 +400,43 @@ bool SetCalibratedValue(const string key, const string val)
       if(s == STRAT_EMA_CROSS || s == STRAT_BREAKOUT) P.maxBars = 0;
       return true;
      }
-   if(key == "risk_mult")   { P.riskMult = MathMin(MathMax(d, 0.0), 2.0); return true; }
-   if(key == "fast")        { P.fast = n;        return n > 0; }
-   if(key == "slow")        { P.slow = n;        return n > 0; }
-   if(key == "adx_min")     { P.adxMin = d;      return true; }
-   if(key == "sl_atr")      { P.slATR = d;       return d > 0; }
-   if(key == "tp_atr")      { P.tpATR = d;       return d >= 0; }
-   if(key == "trail_atr")   { P.trailATR = d;    return d >= 0; }
-   if(key == "brk_period")  { P.brkPeriod = n;   return n > 1; }
-   if(key == "bb_dev")      { P.bbDev = d;       return d > 0; }
-   if(key == "rsi_low")     { P.rsiLow = d;      return d > 0 && d < 50; }
-   if(key == "adx_max_mr")  { P.adxMaxMR = d;    return true; }
-   if(key == "mr_sl_atr")   { P.mrSlATR = d;     return d > 0; }
-   if(key == "max_bars")    { P.maxBars = n;     return n >= 0; }
-   if(key == "lookback")    { P.lookback = n;    return n >= 200; }
-   if(key == "drift_ema")   { P.driftEMA = n;    return n > 0; }
-   if(key == "cooldown")    { P.cooldown = n;    return n >= 0; }
-   if(key == "sl_spike")    { P.slSpike = d;     return d > 0; }
-   if(key == "tp_spike")    { P.tpSpike = d;     return d >= 0; }
-   if(key == "spike_mult")  { P.spikeMult = d;   return d > 1; }
-   if(key == "min_spikes")  { P.minSpikes = n;   return n > 0; }
+   if(key == "risk_mult")  { if(d < 0 || d > 2)    return false; P.riskMult = d;  return true; }
+   if(key == "fast")       { if(n <= 0)            return false; P.fast = n;      return true; }
+   if(key == "slow")       { if(n <= 0)            return false; P.slow = n;      return true; }
+   if(key == "adx_min")    { if(d < 0)             return false; P.adxMin = d;    return true; }
+   if(key == "sl_atr")     { if(d <= 0)            return false; P.slATR = d;     return true; }
+   if(key == "tp_atr")     { if(d < 0)             return false; P.tpATR = d;     return true; }
+   if(key == "trail_atr")  { if(d < 0)             return false; P.trailATR = d;  return true; }
+   if(key == "brk_period") { if(n < 2)             return false; P.brkPeriod = n; return true; }
+   if(key == "bb_dev")     { if(d <= 0)            return false; P.bbDev = d;     return true; }
+   if(key == "rsi_low")    { if(d <= 0 || d >= 50) return false; P.rsiLow = d;    return true; }
+   if(key == "adx_max_mr") { if(d < 0)             return false; P.adxMaxMR = d;  return true; }
+   if(key == "mr_sl_atr")  { if(d <= 0)            return false; P.mrSlATR = d;   return true; }
+   if(key == "max_bars")   { if(n < 0)             return false; P.maxBars = n;   return true; }
+   if(key == "lookback")   { if(n < 200)           return false; P.lookback = n;  return true; }
+   if(key == "drift_ema")  { if(n <= 0)            return false; P.driftEMA = n;  return true; }
+   if(key == "cooldown")   { if(n < 0)             return false; P.cooldown = n;  return true; }
+   if(key == "sl_spike")   { if(d <= 0)            return false; P.slSpike = d;   return true; }
+   if(key == "tp_spike")   { if(d < 0)             return false; P.tpSpike = d;   return true; }
+   if(key == "spike_mult") { if(d <= 1)            return false; P.spikeMult = d; return true; }
+   if(key == "min_spikes") { if(n <= 0)            return false; P.minSpikes = n; return true; }
    return false;
   }
 
-//--- Retourne false si la calibration desactive cet indice
-bool ApplyCalibration()
+//--- Resultat : 1 = calibre et actif, 0 = pas de calibration pour cet indice,
+//--- -1 = desactive par la calibration
+int ApplyCalibration()
   {
-   if(!InpUseCalibration) return true;
    int fh = FileOpen(PRESET_FILE, FILE_READ | FILE_CSV | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ, ',');
-   if(fh == INVALID_HANDLE)
-     {
-      Print("Pas de fichier de calibration : presets integres utilises.");
-      return true;
-     }
+   if(fh == INVALID_HANDLE) return 0;
    bool enabled = true, found = false;
    int applied = 0, rejected = 0;
    while(!FileIsEnding(fh))
      {
       string name = FileReadString(fh);
-      if(FileIsLineEnding(fh)) continue;
+      if(FileIsLineEnding(fh) || FileIsEnding(fh)) continue;
       string key  = FileReadString(fh);
-      if(FileIsLineEnding(fh)) continue;
+      if(FileIsLineEnding(fh) || FileIsEnding(fh)) continue;
       string val  = FileReadString(fh);
       StringTrimLeft(name); StringTrimRight(name);
       StringTrimLeft(key);  StringTrimRight(key);
@@ -444,16 +445,20 @@ bool ApplyCalibration()
       found = true;
       if(key == "enabled") { enabled = StringToInteger(val) != 0; continue; }
       if(SetCalibratedValue(key, val)) applied++;
-      else { rejected++; PrintFormat("Calibration : valeur refusee %s = %s", key, val); }
+      else { rejected++; PrintFormat("Calibration : valeur refusee %s = %s (ignoree)", key, val); }
      }
    FileClose(fh);
-   if(found)
-      PrintFormat("Calibration appliquee a %s : %d valeurs%s%s", P.name, applied,
-                  rejected > 0 ? StringFormat(", %d refusees", rejected) : "",
-                  enabled ? "" : " - INDICE DESACTIVE");
-   else
-      PrintFormat("%s absent du fichier de calibration : presets integres utilises.", P.name);
-   return enabled;
+   if(!found) return 0;
+   PrintFormat("Calibration appliquee a %s : %d valeurs%s%s", P.name, applied,
+               rejected > 0 ? StringFormat(", %d refusees", rejected) : "",
+               enabled ? "" : " - INDICE DESACTIVE");
+   return enabled ? 1 : -1;
+  }
+
+bool IsRealAccount()
+  {
+   return !MQLInfoInteger(MQL_TESTER) &&
+          AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_REAL;
   }
 
 //+------------------------------------------------------------------+
@@ -482,10 +487,26 @@ int OnInit()
    if(InpUsePresets && allowed) LoadPreset(g_family, level);
    else                         LoadManual();
 
-   if(InpUsePresets && allowed && !ApplyCalibration())
+   if(InpUsePresets && allowed && InpUseCalibration)
      {
-      PrintFormat("%s est desactive par la calibration (pas d'avantage valide sur ses donnees).", P.name);
-      return INIT_PARAMETERS_INCORRECT;
+      int cal = ApplyCalibration();
+      if(cal < 0)
+        {
+         PrintFormat("%s est desactive par la calibration (pas d'avantage valide sur ses donnees).", P.name);
+         return INIT_PARAMETERS_INCORRECT;
+        }
+      if(cal == 0)
+        {
+         // Pas de calibration : on refuse sur compte reel (echec "ferme"),
+         // on accepte en demo/testeur avec un avertissement.
+         if(IsRealAccount() && InpRequireCalibReal)
+           {
+            PrintFormat("%s : aucune calibration dans Common\\Files\\%s. Sur compte REEL, le bot "
+                        "refuse de trader des reglages non valides (InpRequireCalibReal).", P.name, PRESET_FILE);
+            return INIT_PARAMETERS_INCORRECT;
+           }
+         PrintFormat("ATTENTION : %s non calibre, presets integres NON VALIDES utilises (demo/testeur).", P.name);
+        }
      }
 
    if(!ValidateParams()) return INIT_PARAMETERS_INCORRECT;
@@ -503,7 +524,8 @@ int OnInit()
    if(InpResetHalt)
      {
       GVDel("HALT");
-      GVSet("PEAK", AccountInfoDouble(ACCOUNT_EQUITY));
+      RescanDeposits();
+      if(g_riskSynced) GVSet("PEAKADJ", AdjEquity());
       Print("Coupe-circuit rearme. Remettez InpResetHalt a false.");
      }
    if(GVGet("HALT", 0) > 0)
@@ -628,18 +650,55 @@ bool DataReady()
 //+------------------------------------------------------------------+
 //| Risque global (partage et persistant)                            |
 //+------------------------------------------------------------------+
+//--- L'equity est suivie NETTE des depots/retraits (lus dans l'historique) :
+//--- un retrait ne ressemble jamais a une perte, un depot jamais a un gain,
+//--- et aucun tick ne peut voir l'un sans l'autre.
+void RescanDeposits()
+  {
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(balance == g_lastBalance && g_riskSynced) return;
+   if(!HistorySelect(0, TimeCurrent() + 86400)) { g_riskSynced = false; return; }
+   double deposits = 0.0, histBalance = 0.0;
+   int n = HistoryDealsTotal();
+   for(int i = 0; i < n; i++)
+     {
+      ulong d = HistoryDealGetTicket(i);
+      long type = HistoryDealGetInteger(d, DEAL_TYPE);
+      if(type == DEAL_TYPE_CREDIT) continue;   // le credit n'entre pas dans le solde
+      double amount = HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_SWAP) +
+                      HistoryDealGetDouble(d, DEAL_COMMISSION) + HistoryDealGetDouble(d, DEAL_FEE);
+      histBalance += amount;
+      if(type == DEAL_TYPE_BALANCE || type == DEAL_TYPE_BONUS) deposits += HistoryDealGetDouble(d, DEAL_PROFIT);
+     }
+   // L'historique doit expliquer le solde, sinon il n'est pas encore a jour :
+   // on suspend les controles (et les entrees) jusqu'au prochain tick.
+   g_riskSynced = MathAbs(histBalance - balance) <= 0.01 + 1e-6 * MathAbs(balance);
+   if(g_riskSynced)
+     {
+      g_netDeposits = deposits;
+      g_lastBalance = balance;
+     }
+  }
+
+//--- Equity hors depots/retraits et hors credit (= resultat cumule du trading)
+double AdjEquity()
+  {
+   return AccountInfoDouble(ACCOUNT_EQUITY) - AccountInfoDouble(ACCOUNT_CREDIT) - g_netDeposits;
+  }
+
 void UpdateRiskState()
   {
-   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   RescanDeposits();
+   if(!g_riskSynced) return;
+   double adj = AdjEquity();
 
-   double peak = GVGet("PEAK", 0);
-   if(eq > peak) { peak = eq; GVSet("PEAK", peak); }
+   if(!GlobalVariableCheck(GVKey("PEAKADJ")) || adj > GVGet("PEAKADJ", adj)) GVSet("PEAKADJ", adj);
 
    int today = TodayId();
    if((int)GVGet("DAY", 0) != today)
      {
       GVSet("DAY", today);
-      GVSet("DAYEQ", eq);
+      GVSet("DAYADJ", adj);
      }
    string sk = SymKey();
    if((int)GVGet(sk + "_TDAY", 0) != today)
@@ -648,7 +707,7 @@ void UpdateRiskState()
       GVSet(sk + "_TRADES", 0);
      }
 
-   if(GVGet("HALT", 0) <= 0 && peak > 0 && (peak - eq) / peak * 100.0 >= InpMaxDDPercent)
+   if(GVGet("HALT", 0) <= 0 && DrawdownPct() >= InpMaxDDPercent)
      {
       GVSet("HALT", 1);
       PrintFormat("COUPE-CIRCUIT : drawdown >= %.1f%% depuis le pic. Tous les graphiques s'arretent.",
@@ -658,35 +717,20 @@ void UpdateRiskState()
       ClosePosition((ulong)PositionGetInteger(POSITION_TICKET));
   }
 
-//--- Depot ou retrait : on decale le pic et l'equity de debut de journee
-//--- du meme montant, pour qu'un retrait ne declenche pas le coupe-circuit.
-void HandleBalanceDeal(ulong deal)
+//--- Pertes en % de l'equity qu'avait le compte au pic / en debut de journee,
+//--- au niveau de depots actuel.
+double DrawdownPct()
   {
-   double amount = HistoryDealGetDouble(deal, DEAL_PROFIT);
-   if(amount == 0) return;
-   string key = GVKey("LASTBAL");
-   if(!GlobalVariableCheck(key)) GlobalVariableSet(key, 0);
-   double last = GlobalVariableGet(key);
-   if((double)deal <= last) return;
-   // Mise a jour atomique : un seul graphique traite chaque operation
-   if(!GlobalVariableSetOnCondition(key, (double)deal, last)) return;
-   if(GVGet("PEAK", 0) > 0)  GVSet("PEAK", MathMax(GVGet("PEAK", 0) + amount, 0.0));
-   if(GVGet("DAYEQ", 0) > 0) GVSet("DAYEQ", MathMax(GVGet("DAYEQ", 0) + amount, 0.0));
-   PrintFormat("Operation de solde %.2f prise en compte (pic et debut de journee ajustes).", amount);
+   double peak = GVGet("PEAKADJ", AdjEquity());
+   double base = peak + g_netDeposits;
+   return base > 0 ? (peak - AdjEquity()) / base * 100.0 : 0.0;
   }
 
 double DailyLossPct()
   {
-   double dayEq = GVGet("DAYEQ", 0);
-   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
-   return dayEq > 0 ? (dayEq - eq) / dayEq * 100.0 : 0.0;
-  }
-
-double DrawdownPct()
-  {
-   double peak = GVGet("PEAK", 0);
-   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
-   return peak > 0 ? (peak - eq) / peak * 100.0 : 0.0;
+   double dayAdj = GVGet("DAYADJ", AdjEquity());
+   double base = dayAdj + g_netDeposits;
+   return base > 0 ? (dayAdj - AdjEquity()) / base * 100.0 : 0.0;
   }
 
 bool TradingAllowed()
@@ -696,7 +740,7 @@ bool TradingAllowed()
       return false;
    long mode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
    if(mode == SYMBOL_TRADE_MODE_DISABLED || mode == SYMBOL_TRADE_MODE_CLOSEONLY) return false;
-   if(GVGet("HALT", 0) > 0) return false;
+   if(!g_riskSynced || GVGet("HALT", 0) > 0) return false;
    if(DailyLossPct() >= InpDailyLossPercent) return false;
    if((int)GVGet(SymKey() + "_TRADES", 0) >= InpMaxTradesPerDay) return false;
    if(InpMaxSpreadPts > 0 && SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) > InpMaxSpreadPts) return false;
@@ -1092,12 +1136,6 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
   {
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal == 0) return;
    if(!HistoryDealSelect(trans.deal)) return;
-
-   if(HistoryDealGetInteger(trans.deal, DEAL_TYPE) == DEAL_TYPE_BALANCE)
-     {
-      HandleBalanceDeal(trans.deal);
-      return;
-     }
 
    if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol) return;
    long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
