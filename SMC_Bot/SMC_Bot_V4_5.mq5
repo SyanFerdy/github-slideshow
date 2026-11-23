@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
-//|                                                SMC_Bot_V4_4.mq5  |
+//|                                                SMC_Bot_V4_5.mq5  |
 //|   Bot SMC multi-symboles - OB 5 etoiles                          |
 //|   Sweep de liquidite + deplacement + BOS + FVG + OB vierge        |
 //|   Discount/Premium HTF, entree a profondeur d'OB, confirmation    |
 //|   LTF, SL structurel, gestion R-Based, profils par classe d'actif |
 //+------------------------------------------------------------------+
-#property copyright "SMC Bot V4.4"
-#property version   "4.40"
+#property copyright "SMC Bot V4.5"
+#property version   "4.50"
 #property description "OB 5 etoiles : sweep de liquidite, deplacement, BOS, FVG, OB vierge, discount/premium HTF."
 #property description "Confirmation CHoCH/engulfing LTF, SL au-dela de l'extreme, place jusqu'a la liquidite opposee."
 #property description "Execution robuste : retries, verification SL/TP apres execution, netting, cotations figees."
@@ -30,6 +30,15 @@ enum ENUM_SETUP_STATE
    SETUP_WATCHING = 1,   // OB arme, on attend que le prix atteigne le niveau d'entree
    SETUP_IN_ZONE  = 2,   // Prix dans l'OB, on attend la confirmation LTF
    SETUP_IN_TRADE = 3    // Position ouverte
+};
+
+// Compteurs de diagnostic par symbole (rapport de fin)
+enum ENUM_STAT
+{
+   ST_OB_ARMED = 0, ST_TOUCH, ST_CONFIRM, ST_TIMEOUT, ST_INVALID,
+   ST_B_SESSION, ST_B_FRIDAY, ST_B_RISK, ST_B_NEWS, ST_B_CORR, ST_B_OTHER,
+   ST_R_SLWIDE, ST_R_SPREAD, ST_R_ROOM, ST_R_LOT, ST_R_OTHER, ST_TRADES,
+   ST_COUNT
 };
 
 //+------------------------------------------------------------------+
@@ -125,6 +134,32 @@ input bool     InpCRY_UseSession   = false;      // Appliquer le filtre de sessi
 input group "=== SL minimum (tous profils) ==="
 input double   InpMinSLATR         = 0.5;        // SL minimum (x ATR) - evite les SL dans le bruit
 
+input group "=== Reglages propres a chaque paire (0 = valeur du profil) ==="
+input double   InpEURUSD_RR        = 0;          // EURUSD : ratio R:R
+input double   InpEURUSD_SLBufATR  = 0;          // EURUSD : marge du SL (x ATR)
+input double   InpEURUSD_MaxSLATR  = 0;          // EURUSD : SL maximum (x ATR)
+input double   InpXAUUSD_RR        = 0;          // XAUUSD : ratio R:R
+input double   InpXAUUSD_SLBufATR  = 0;          // XAUUSD : marge du SL (x ATR)
+input double   InpXAUUSD_MaxSLATR  = 0;          // XAUUSD : SL maximum (x ATR)
+input double   InpUS30_RR          = 0;          // US30 : ratio R:R
+input double   InpUS30_SLBufATR    = 0;          // US30 : marge du SL (x ATR)
+input double   InpUS30_MaxSLATR    = 0;          // US30 : SL maximum (x ATR)
+input double   InpBTCUSD_RR        = 0;          // BTCUSD : ratio R:R
+input double   InpBTCUSD_SLBufATR  = 0;          // BTCUSD : marge du SL (x ATR)
+input double   InpBTCUSD_MaxSLATR  = 0;          // BTCUSD : SL maximum (x ATR)
+input double   InpGBPUSD_RR        = 0;          // GBPUSD : ratio R:R
+input double   InpGBPUSD_SLBufATR  = 0;          // GBPUSD : marge du SL (x ATR)
+input double   InpGBPUSD_MaxSLATR  = 0;          // GBPUSD : SL maximum (x ATR)
+input double   InpUSDJPY_RR        = 0;          // USDJPY : ratio R:R
+input double   InpUSDJPY_SLBufATR  = 0;          // USDJPY : marge du SL (x ATR)
+input double   InpUSDJPY_MaxSLATR  = 0;          // USDJPY : SL maximum (x ATR)
+input double   InpAUDUSD_RR        = 0;          // AUDUSD : ratio R:R
+input double   InpAUDUSD_SLBufATR  = 0;          // AUDUSD : marge du SL (x ATR)
+input double   InpAUDUSD_MaxSLATR  = 0;          // AUDUSD : SL maximum (x ATR)
+
+input group "=== Journal des trades ==="
+input bool     InpWriteTradeLog    = true;       // Ecrire un fichier CSV detaille par trade (dossier Common\Files)
+
 input group "=== Notifications ==="
 input bool     InpSendPush         = true;       // Envoyer notifications push
 input bool     InpVerbose          = true;       // Journal detaille
@@ -156,20 +191,20 @@ input int      InpMagicNumber      = 20241006;   // Magic Number
 input int      InpSlippage         = 30;         // Slippage max (points)
 input int      InpOrderRetries     = 3;          // Tentatives d'envoi d'ordre (requote, prix change...)
 input int      InpMaxQuoteAgeSec   = 120;        // Cotation plus vieille = marche ferme, pas d'entree
-input int      InpTesterMinTrades  = 100;        // Trades min pour le critere d'optimisation
+input int      InpTesterMinTrades  = 30;         // Trades min pour le critere d'optimisation (OnTester = 0 en dessous)
 
 //+------------------------------------------------------------------+
 //| OUTILS                                                           |
 //+------------------------------------------------------------------+
 void Log(const string msg)
 {
-   if(InpVerbose) Print("[SMC4.4] ", msg);
+   if(InpVerbose) Print("[SMC4.5] ", msg);
 }
 
 void Notify(const string msg)
 {
-   Print("[SMC4.4] ", msg);
-   if(InpSendPush && !MQLInfoInteger(MQL_TESTER)) SendNotification("SMC4.4 " + msg);
+   Print("[SMC4.5] ", msg);
+   if(InpSendPush && !MQLInfoInteger(MQL_TESTER)) SendNotification("SMC4.5 " + msg);
 }
 
 double NormalizePrice(const string sym, double price)
@@ -228,6 +263,24 @@ struct SSymbolProfile
    double           maxSLATR;
    double           maxSpreadPct;
    bool             useSession;
+};
+
+// Trade ouvert suivi pour le journal CSV
+struct STradeRec
+{
+   long     id;          // POSITION_IDENTIFIER
+   string   symbol;
+   int      dir;
+   int      confType;    // 1 = engulfing, 2 = CHoCH
+   bool     swept;
+   bool     inZone;
+   double   slATR;       // taille du SL en ATR MTF
+   double   roomR;       // place jusqu'a l'extreme HTF oppose, en R (-1 = inconnue)
+   double   entry;       // prix d'entree reel
+   double   R0;          // risque initial en prix
+   datetime openTime;
+   double   mfe;         // meilleure excursion (R)
+   double   mae;         // pire excursion (R)
 };
 
 struct SOrderBlock
@@ -358,6 +411,15 @@ public:
    bool             zonesReady;       // au moins un calcul reussi
    bool             zonesPending;     // recalcul demande (nouvelle bougie HTF)
 
+   // Diagnostic
+   int              stat[20];         // compteurs ENUM_STAT
+   int              confType;         // type de la derniere confirmation (1 engulfing, 2 CHoCH)
+   double           lastSLATR;        // dernier SL calcule (x ATR)
+   double           lastRoomR;        // derniere place calculee jusqu'a la liquidite (R)
+   int              nClosed;
+   double           sumR, sumMFE, sumMAE;
+   int              nTP, nLock, nBE, nSL, nOther;
+
    CSymbolContext()
    {
       symbol = ""; atrHandle = INVALID_HANDLE; ready = false;
@@ -366,6 +428,9 @@ public:
       newsCheckTime = 0; newsBlocked = false;
       atrHTFHandle = INVALID_HANDLE; htfATR = 0; zoneCount = 0; zonesReady = false; zonesPending = false;
       for(int i = 0; i < 40; i++) { zoneHigh[i] = 0; zoneLow[i] = 0; zoneTime[i] = 0; }
+      for(int i = 0; i < 20; i++) stat[i] = 0;
+      confType = 0; lastSLATR = 0; lastRoomR = -1;
+      nClosed = 0; sumR = 0; sumMFE = 0; sumMAE = 0; nTP = 0; nLock = 0; nBE = 0; nSL = 0; nOther = 0;
       ResetSetup();
    }
 
@@ -831,7 +896,7 @@ public:
       return 0;
    }
 
-   // Confirmation sur bougies LTF CLOTUREES. Retour : 1 = confirme, 0 = non, -1 = donnees indisponibles
+   // Confirmation sur bougies LTF CLOTUREES. Retour : 1 = engulfing, 2 = CHoCH, 0 = non, -1 = donnees indisponibles
    int ConfirmLTF(CSymbolContext &c)
    {
       int s    = MathMax(1, InpLTFSwingStrength);
@@ -878,7 +943,7 @@ public:
             if(dir == 1  && r[q].close > level) return 0;
             if(dir == -1 && r[q].close < level) return 0;
          }
-         return 1;
+         return 2;                                     // 2 = CHoCH (1 = engulfing)
       }
       return 0;
    }
@@ -899,9 +964,12 @@ private:
    datetime        m_lastCleanup;
    ulong           m_failTicket[];     // anti-spam des modifications refusees
    datetime        m_failTime[];
+   STradeRec       m_trades[];         // trades ouverts suivis pour le journal
+   bool            m_logEnabled;
+   string          m_logFile;
 
 public:
-   CSmcBot() { m_count = 0; m_lastCleanup = 0; m_gvPrefix = ""; }
+   CSmcBot() { m_count = 0; m_lastCleanup = 0; m_gvPrefix = ""; m_logEnabled = false; m_logFile = ""; }
 
    bool Init()
    {
@@ -918,21 +986,32 @@ public:
       if(MQLInfoInteger(MQL_TESTER)) GlobalVariablesDeleteAll(m_gvPrefix);
       m_lastCleanup = 0;
       ArrayResize(m_failTicket, 0); ArrayResize(m_failTime, 0);
+      ArrayResize(m_trades, 0);
+
+      // Journal CSV (desactive en optimisation : trop de passes en parallele)
+      m_logEnabled = InpWriteTradeLog && !MQLInfoInteger(MQL_OPTIMIZATION);
+      m_logFile    = MQLInfoInteger(MQL_TESTER) ? "SMC45_trades_tester.csv"
+                                                : "SMC45_trades_" + IntegerToString(InpMagicNumber) + ".csv";
+      if(m_logEnabled)
+      {
+         if(MQLInfoInteger(MQL_TESTER)) FileDelete(m_logFile, FILE_COMMON);   // chaque backtest repart d'un fichier vide
+         Print("[SMC4.5] Journal des trades : ", TerminalInfoString(TERMINAL_COMMONDATA_PATH), "\\Files\\", m_logFile);
+      }
 
       m_count = 0;
       ArrayResize(m_ctx, 0);
-      AddSymbol(InpTradeEURUSD, InpNameEURUSD);
-      AddSymbol(InpTradeXAUUSD, InpNameXAUUSD);
-      AddSymbol(InpTradeUS30,   InpNameUS30);
-      AddSymbol(InpTradeBTCUSD, InpNameBTCUSD);
-      AddSymbol(InpTradeGBPUSD, InpNameGBPUSD);
-      AddSymbol(InpTradeUSDJPY, InpNameUSDJPY);
-      AddSymbol(InpTradeAUDUSD, InpNameAUDUSD);
+      AddSymbol(InpTradeEURUSD, InpNameEURUSD, InpEURUSD_RR, InpEURUSD_SLBufATR, InpEURUSD_MaxSLATR);
+      AddSymbol(InpTradeXAUUSD, InpNameXAUUSD, InpXAUUSD_RR, InpXAUUSD_SLBufATR, InpXAUUSD_MaxSLATR);
+      AddSymbol(InpTradeUS30,   InpNameUS30,   InpUS30_RR,   InpUS30_SLBufATR,   InpUS30_MaxSLATR);
+      AddSymbol(InpTradeBTCUSD, InpNameBTCUSD, InpBTCUSD_RR, InpBTCUSD_SLBufATR, InpBTCUSD_MaxSLATR);
+      AddSymbol(InpTradeGBPUSD, InpNameGBPUSD, InpGBPUSD_RR, InpGBPUSD_SLBufATR, InpGBPUSD_MaxSLATR);
+      AddSymbol(InpTradeUSDJPY, InpNameUSDJPY, InpUSDJPY_RR, InpUSDJPY_SLBufATR, InpUSDJPY_MaxSLATR);
+      AddSymbol(InpTradeAUDUSD, InpNameAUDUSD, InpAUDUSD_RR, InpAUDUSD_SLBufATR, InpAUDUSD_MaxSLATR);
 
-      if(m_count == 0) { Print("[SMC4.4] Aucun symbole valide : verifie les noms (suffixes broker)"); return false; }
+      if(m_count == 0) { Print("[SMC4.5] Aucun symbole valide : verifie les noms (suffixes broker)"); return false; }
 
       ENUM_ACCOUNT_MARGIN_MODE mm = (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
-      Print("[SMC4.4] Compte ", (mm == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING ? "hedging" : "netting"),
+      Print("[SMC4.5] Compte ", (mm == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING ? "hedging" : "netting"),
             " - ", m_count, " symbole(s) actif(s)");
       return true;
    }
@@ -950,6 +1029,7 @@ public:
    {
       m_risk.Update();
       ManagePositions();                         // toujours, meme hors session
+      CheckClosedTrades();                       // journal : trades qui viennent de se fermer
       for(int i = 0; i < m_count; i++) ProcessSymbol(m_ctx[i]);
 
       if(TimeCurrent() - m_lastCleanup > 300) { CleanupGlobals(); m_lastCleanup = TimeCurrent(); }
@@ -958,7 +1038,9 @@ public:
    // Rapport par symbole (PF, winrate) : affiche a l'arret de l'EA / fin du backtest
    void PrintReport()
    {
-      if(m_count == 0 || !HistorySelect(0, TimeCurrent())) return;
+      if(m_count == 0) return;
+      CheckClosedTrades();
+      if(!HistorySelect(0, TimeCurrent())) return;
       double gp[], gl[]; int cnt[], wins[];
       ArrayResize(gp, m_count); ArrayResize(gl, m_count); ArrayResize(cnt, m_count); ArrayResize(wins, m_count);
       ArrayInitialize(gp, 0); ArrayInitialize(gl, 0); ArrayInitialize(cnt, 0); ArrayInitialize(wins, 0);
@@ -978,19 +1060,35 @@ public:
          if(pnl >= 0) { gp[idx] += pnl; wins[idx]++; } else gl[idx] += -pnl;
       }
 
-      Print("[SMC4.4] ===== Rapport par symbole =====");
+      Print("[SMC4.5] ===== Rapport par symbole =====");
       for(int i = 0; i < m_count; i++)
       {
          double pf = (gl[i] > 0) ? gp[i] / gl[i] : (gp[i] > 0 ? 999.0 : 0.0);
          double wr = (cnt[i] > 0) ? 100.0 * wins[i] / cnt[i] : 0.0;
          string verdict = (cnt[i] < 30) ? "echantillon trop petit" : (pf >= 1.5 ? "OK" : "< 1.5");
-         Print(StringFormat("[SMC4.4] %-10s trades=%d  winrate=%.1f%%  PF=%.2f  net=%.2f  %s",
+         Print(StringFormat("[SMC4.5] %-10s trades=%d  winrate=%.1f%%  PF=%.2f  net=%.2f  %s",
                m_ctx[i].symbol, cnt[i], wr, pf, gp[i] - gl[i], verdict));
+
+         int st[]; ArrayResize(st, 20);
+         for(int k = 0; k < 20; k++) st[k] = m_ctx[i].stat[k];
+         Print(StringFormat("[SMC4.5]    entonnoir : OB armes=%d  toucher=%d  confirmations=%d  timeout=%d  invalides=%d  trades=%d",
+               st[ST_OB_ARMED], st[ST_TOUCH], st[ST_CONFIRM], st[ST_TIMEOUT], st[ST_INVALID], st[ST_TRADES]));
+         Print(StringFormat("[SMC4.5]    bloques   : session=%d  vendredi=%d  risque=%d  news=%d  correlation=%d  autre=%d",
+               st[ST_B_SESSION], st[ST_B_FRIDAY], st[ST_B_RISK], st[ST_B_NEWS], st[ST_B_CORR], st[ST_B_OTHER]));
+         Print(StringFormat("[SMC4.5]    refuses   : SL_trop_large=%d  spread=%d  place_liquidite=%d  lot_marge=%d  autre=%d",
+               st[ST_R_SLWIDE], st[ST_R_SPREAD], st[ST_R_ROOM], st[ST_R_LOT], st[ST_R_OTHER]));
+         int nc = m_ctx[i].nClosed;
+         if(nc > 0)
+            Print(StringFormat("[SMC4.5]    en R      : moyen=%.2fR  MFE moyen=%.2fR  MAE moyen=%.2fR | sorties TP=%d  lock/trail=%d  BE=%d  SL=%d  autre=%d",
+                  m_ctx[i].sumR / nc, m_ctx[i].sumMFE / nc, m_ctx[i].sumMAE / nc,
+                  m_ctx[i].nTP, m_ctx[i].nLock, m_ctx[i].nBE, m_ctx[i].nSL, m_ctx[i].nOther));
       }
+      if(m_logEnabled)
+         Print("[SMC4.5] Detail de chaque trade : ", TerminalInfoString(TERMINAL_COMMONDATA_PATH), "\\Files\\", m_logFile);
    }
 
 private:
-   bool Fail(const string msg) { Print("[SMC4.4] Parametre invalide : ", msg); return false; }
+   bool Fail(const string msg) { Print("[SMC4.5] Parametre invalide : ", msg); return false; }
 
    bool ValidateInputs()
    {
@@ -1022,20 +1120,54 @@ private:
       if(InpUseRoomFilter && InpMinRoomR <= 0)                           return Fail("place minimale (R) <= 0");
       if(InpFX_SLBufferATR < 0 || InpGOLD_SLBufferATR < 0 || InpIDX_SLBufferATR < 0 || InpCRY_SLBufferATR < 0) return Fail("marge SL negative");
       if(InpFX_MaxSpreadPct <= 0 || InpGOLD_MaxSpreadPct <= 0 || InpIDX_MaxSpreadPct <= 0 || InpCRY_MaxSpreadPct <= 0) return Fail("spread max <= 0");
+      if(!OverrideOk("EURUSD", InpEURUSD_RR, InpEURUSD_SLBufATR, InpEURUSD_MaxSLATR)) return false;
+      if(!OverrideOk("XAUUSD", InpXAUUSD_RR, InpXAUUSD_SLBufATR, InpXAUUSD_MaxSLATR)) return false;
+      if(!OverrideOk("US30",   InpUS30_RR,   InpUS30_SLBufATR,   InpUS30_MaxSLATR))   return false;
+      if(!OverrideOk("BTCUSD", InpBTCUSD_RR, InpBTCUSD_SLBufATR, InpBTCUSD_MaxSLATR)) return false;
+      if(!OverrideOk("GBPUSD", InpGBPUSD_RR, InpGBPUSD_SLBufATR, InpGBPUSD_MaxSLATR)) return false;
+      if(!OverrideOk("USDJPY", InpUSDJPY_RR, InpUSDJPY_SLBufATR, InpUSDJPY_MaxSLATR)) return false;
+      if(!OverrideOk("AUDUSD", InpAUDUSD_RR, InpAUDUSD_SLBufATR, InpAUDUSD_MaxSLATR)) return false;
       return true;
    }
 
-   void AddSymbol(bool enabled, const string name)
+   bool OverrideOk(const string pair, double rr, double buf, double maxSL)
+   {
+      if(rr < 0 || buf < 0 || maxSL < 0) return Fail(pair + " : reglage propre negatif");
+      if(maxSL > 0 && maxSL <= InpMinSLATR) return Fail(pair + " : SL maximum doit etre > SL minimum");
+      return true;
+   }
+
+   // Categorie d'un blocage (EntryAllowed) ou d'un refus (ComputeLevels) pour les compteurs
+   int BlockCategory(const string why)
+   {
+      if(StringFind(why, "hors session") >= 0) return ST_B_SESSION;
+      if(StringFind(why, "vendredi") >= 0)     return ST_B_FRIDAY;
+      if(StringFind(why, "news") >= 0)         return ST_B_NEWS;
+      if(StringFind(why, "correle") >= 0)      return ST_B_CORR;
+      if(StringFind(why, "trades atteint") >= 0 || StringFind(why, "perte journaliere") >= 0 || StringFind(why, "risque total") >= 0) return ST_B_RISK;
+      return ST_B_OTHER;
+   }
+
+   int RefuseCategory(const string why)
+   {
+      if(StringFind(why, "SL trop large") >= 0) return ST_R_SLWIDE;
+      if(StringFind(why, "spread") >= 0)        return ST_R_SPREAD;
+      if(StringFind(why, "place") >= 0)         return ST_R_ROOM;
+      if(StringFind(why, "lot") >= 0 || StringFind(why, "marge") >= 0 || StringFind(why, "risque total") >= 0) return ST_R_LOT;
+      return ST_R_OTHER;
+   }
+
+   void AddSymbol(bool enabled, const string name, double rrOv, double bufOv, double maxSLOv)
    {
       if(!enabled) return;
       string sym = name;
       StringTrimLeft(sym); StringTrimRight(sym);
       if(sym == "") return;
-      if(FindContext(sym) >= 0) { Print("[SMC4.4] ", sym, " deja ajoute, doublon ignore"); return; }
-      if(!SymbolSelect(sym, true)) { Print("[SMC4.4] Symbole introuvable : ", sym, " (verifie le nom/suffixe du broker)"); return; }
+      if(FindContext(sym) >= 0) { Print("[SMC4.5] ", sym, " deja ajoute, doublon ignore"); return; }
+      if(!SymbolSelect(sym, true)) { Print("[SMC4.5] Symbole introuvable : ", sym, " (verifie le nom/suffixe du broker)"); return; }
 
       int handle = iATR(sym, InpMTF, InpATRPeriod);
-      if(handle == INVALID_HANDLE) { Print("[SMC4.4] Impossible de creer l'ATR pour ", sym); return; }
+      if(handle == INVALID_HANDLE) { Print("[SMC4.5] Impossible de creer l'ATR pour ", sym); return; }
 
       // ATR HTF : cree uniquement si le filtre de zones HTF est actif
       int handleHTF = INVALID_HANDLE;
@@ -1044,7 +1176,7 @@ private:
          handleHTF = iATR(sym, InpHTF, InpATRPeriod);
          if(handleHTF == INVALID_HANDLE)
          {
-            Print("[SMC4.4] Impossible de creer l'ATR HTF pour ", sym);
+            Print("[SMC4.5] Impossible de creer l'ATR HTF pour ", sym);
             IndicatorRelease(handle);
             return;
          }
@@ -1057,7 +1189,13 @@ private:
       m_ctx[idx].atrHandle    = handle;
       m_ctx[idx].atrHTFHandle = handleHTF;
       CProfileManager::Get(sym, m_ctx[idx].profile);
+      // Reglages propres a la paire (0 = on garde la valeur du profil)
+      bool custom = (rrOv > 0 || bufOv > 0 || maxSLOv > 0);
+      if(rrOv > 0)    m_ctx[idx].profile.rewardRatio = rrOv;
+      if(bufOv > 0)   m_ctx[idx].profile.slBufferATR = bufOv;
+      if(maxSLOv > 0) m_ctx[idx].profile.maxSLATR    = maxSLOv;
       m_ctx[idx].ready     = true;
+      if(custom) Print("[SMC4.5] ", sym, " : reglages propres a la paire appliques");
 
       // Prechargement de l'historique (declenche le telechargement si necessaire)
       MqlRates tmp[];
@@ -1065,7 +1203,7 @@ private:
       CopyRates(sym, InpMTF, 0, InpMaxOBAgeBars + 50, tmp);
       CopyRates(sym, InpLTF, 0, 100, tmp);
 
-      Print(StringFormat("[SMC4.4] %s ajoute - profil %s : RR=%.1f, marge SL=%.2f ATR, SL %.1f-%.1f ATR, spread max=%.0f%% du SL, session=%s",
+      Print(StringFormat("[SMC4.5] %s ajoute - profil %s : RR=%.1f, marge SL=%.2f ATR, SL %.1f-%.1f ATR, spread max=%.0f%% du SL, session=%s",
             sym, CProfileManager::ClassName(m_ctx[idx].profile.assetClass), m_ctx[idx].profile.rewardRatio,
             m_ctx[idx].profile.slBufferATR, m_ctx[idx].profile.minSLATR, m_ctx[idx].profile.maxSLATR,
             m_ctx[idx].profile.maxSpreadPct, (m_ctx[idx].profile.useSession ? "oui" : "non")));
@@ -1134,6 +1272,7 @@ private:
          if(res < 0) { c.lastMTFBar = 0; return; }
          if(res == 1)
          {
+            if(!c.ob.valid || found.time != c.ob.time) c.stat[ST_OB_ARMED]++;
             if(!c.ob.valid || found.time != c.ob.time)
                Log(StringFormat("%s : OB %s arme [%s - %s] du %s, entree a %s, invalidation %s%s%s",
                    sym, found.direction == 1 ? "haussier" : "baissier",
@@ -1163,6 +1302,7 @@ private:
          if(!touched) return;
 
          c.state      = SETUP_IN_ZONE;
+         c.stat[ST_TOUCH]++;
          c.touchTime  = TimeCurrent();
          c.lastLTFBar = iTime(sym, InpLTF, 0);
          Log(StringFormat("%s : niveau d'entree atteint, attente de confirmation %s", sym, EnumToString(InpLTF)));
@@ -1174,6 +1314,7 @@ private:
          if(TimeCurrent() - c.touchTime > (long)InpConfirmMaxBars * PeriodSeconds(InpLTF))
          {
             Log(sym + " : pas de confirmation a temps, OB abandonne");
+            c.stat[ST_TIMEOUT]++;
             c.lastUsedOBTime = c.ob.time; c.ResetSetup(); return;
          }
          if(!IsNewBar(sym, InpLTF, c.lastLTFBar)) return;
@@ -1182,16 +1323,19 @@ private:
          if(lastClose > 0 && ((c.ob.direction == 1 && lastClose < c.ob.extreme) || (c.ob.direction == -1 && lastClose > c.ob.extreme)))
          {
             Log(sym + " : cloture LTF au-dela de l'extreme, setup invalide");
+            c.stat[ST_INVALID]++;
             c.lastUsedOBTime = c.ob.time; c.ResetSetup(); return;
          }
 
          int conf = m_engine.ConfirmLTF(c);
          if(conf < 0) { c.lastLTFBar = 0; return; }          // donnees pas pretes : on reessaiera
          if(conf == 0) return;
-         Log(sym + " : confirmation LTF obtenue");
+         c.confType = conf;
+         c.stat[ST_CONFIRM]++;
+         Log(sym + " : confirmation LTF obtenue (" + (conf == 1 ? "engulfing" : "CHoCH") + ")");
 
          string why;
-         if(!EntryAllowed(c, why)) { Log(sym + " : entree bloquee - " + why); return; }
+         if(!EntryAllowed(c, why)) { c.stat[BlockCategory(why)]++; Log(sym + " : entree bloquee - " + why); return; }
 
          c.lastUsedOBTime = c.ob.time;
          if(TryEnter(c)) c.state = SETUP_IN_TRADE;
@@ -1369,6 +1513,9 @@ private:
       if(risk <= MinStopDistance(sym) + spread) { why = "SL sous la distance minimale du broker"; return false; }
 
       // Place jusqu'a la liquidite HTF opposee (haut du range pour un achat, bas pour une vente)
+      c.lastSLATR = risk / atr;
+      c.lastRoomR = -1;
+      if(c.htfHigh > c.htfLow) c.lastRoomR = ((dir == 1) ? c.htfHigh - entry : entry - c.htfLow) / risk;
       if(InpUseRoomFilter && c.htfHigh > c.htfLow)
       {
          double room = (dir == 1) ? c.htfHigh - entry : entry - c.htfLow;
@@ -1394,13 +1541,13 @@ private:
       string sym = c.symbol;
       int    dir = c.ob.direction;
       m_trade.SetTypeFillingBySymbol(sym);
-      string comment = StringFormat("SMC4.4 %s RR%.1f", dir == 1 ? "BUY" : "SELL", c.profile.rewardRatio);
+      string comment = StringFormat("SMC4.5 %s RR%.1f", dir == 1 ? "BUY" : "SELL", c.profile.rewardRatio);
 
       for(int attempt = 1; attempt <= InpOrderRetries; attempt++)
       {
          double entry = 0, sl = 0, tp = 0, lots = 0;
          string why;
-         if(!ComputeLevels(c, entry, sl, tp, lots, why)) { Log(sym + " : trade refuse - " + why); return false; }
+         if(!ComputeLevels(c, entry, sl, tp, lots, why)) { c.stat[RefuseCategory(why)]++; Log(sym + " : trade refuse - " + why); return false; }
 
          bool ok = (dir == 1) ? m_trade.Buy(lots, sym, 0.0, sl, tp, comment) : m_trade.Sell(lots, sym, 0.0, sl, tp, comment);
          uint rc = m_trade.ResultRetcode();
@@ -1412,6 +1559,8 @@ private:
                    dir == 1 ? "BUY" : "SELL", sym, lots, PriceStr(sym, m_trade.ResultPrice()),
                    PriceStr(sym, sl), PriceStr(sym, tp),
                    dir == 1 ? "haussier" : "baissier", c.ob.swept ? " + sweep" : ""));
+            c.stat[ST_TRADES]++;
+            TrackNewTrade(c);
             return true;
          }
          if(!IsRetryable(rc) || attempt == InpOrderRetries)
@@ -1502,13 +1651,128 @@ private:
       m_failTicket[n] = ticket; m_failTime[n] = TimeCurrent();
    }
 
+   //--- Journal des trades ------------------------------------------------
+   void TrackNewTrade(CSymbolContext &c)
+   {
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong t = PositionGetTicket(i);
+         if(t == 0 || PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != c.symbol) continue;
+         long   id   = PositionGetInteger(POSITION_IDENTIFIER);
+         bool   buy  = ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+         double open = PositionGetDouble(POSITION_PRICE_OPEN);
+         double R0   = GetInitialRisk(c.symbol, id, buy, open, PositionGetDouble(POSITION_SL), PositionGetDouble(POSITION_TP));
+         if(R0 <= 0) return;
+         for(int k = 0; k < ArraySize(m_trades); k++) if(m_trades[k].id == id) return;   // deja suivi
+
+         int n = ArraySize(m_trades);
+         ArrayResize(m_trades, n + 1);
+         m_trades[n].id       = id;
+         m_trades[n].symbol   = c.symbol;
+         m_trades[n].dir      = buy ? 1 : -1;
+         m_trades[n].confType = c.confType;
+         m_trades[n].swept    = c.ob.swept;
+         m_trades[n].inZone   = c.ob.inHTFZone;
+         m_trades[n].slATR    = c.lastSLATR;
+         m_trades[n].roomR    = c.lastRoomR;
+         m_trades[n].entry    = open;
+         m_trades[n].R0       = R0;
+         m_trades[n].openTime = (datetime)PositionGetInteger(POSITION_TIME);
+         m_trades[n].mfe      = 0;
+         m_trades[n].mae      = 0;
+         return;
+      }
+   }
+
+   void UpdateExcursion(long id, double rNow)
+   {
+      for(int k = 0; k < ArraySize(m_trades); k++)
+         if(m_trades[k].id == id)
+         {
+            if(rNow > m_trades[k].mfe) m_trades[k].mfe = rNow;
+            if(rNow < m_trades[k].mae) m_trades[k].mae = rNow;
+            return;
+         }
+   }
+
+   void CheckClosedTrades()
+   {
+      for(int i = ArraySize(m_trades) - 1; i >= 0; i--)
+      {
+         if(PositionExistsById(m_trades[i].id)) continue;
+         FinalizeTrade(m_trades[i]);
+         int last = ArraySize(m_trades) - 1;
+         if(i != last) m_trades[i] = m_trades[last];
+         ArrayResize(m_trades, last);
+      }
+   }
+
+   void FinalizeTrade(STradeRec &t)
+   {
+      if(!HistorySelectByPosition(t.id)) return;
+      double   exitPrice = 0, net = 0;
+      long     reason    = -1;
+      datetime exitTime  = 0;
+      int deals = HistoryDealsTotal();
+      for(int k = 0; k < deals; k++)
+      {
+         ulong d = HistoryDealGetTicket(k);
+         if(d == 0) continue;
+         net += HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_SWAP) + HistoryDealGetDouble(d, DEAL_COMMISSION);
+         ENUM_DEAL_ENTRY e = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(d, DEAL_ENTRY);
+         if(e == DEAL_ENTRY_OUT || e == DEAL_ENTRY_OUT_BY || e == DEAL_ENTRY_INOUT)
+         {
+            exitPrice = HistoryDealGetDouble(d, DEAL_PRICE);
+            reason    = HistoryDealGetInteger(d, DEAL_REASON);
+            exitTime  = (datetime)HistoryDealGetInteger(d, DEAL_TIME);
+         }
+      }
+      if(exitPrice <= 0 || t.R0 <= 0) return;
+
+      double resR = t.dir * (exitPrice - t.entry) / t.R0;
+      if(resR > t.mfe) t.mfe = resR;
+      if(resR < t.mae) t.mae = resR;
+      string exitType = "AUTRE";
+      if((ENUM_DEAL_REASON)reason == DEAL_REASON_TP)      exitType = "TP";
+      else if((ENUM_DEAL_REASON)reason == DEAL_REASON_SL) exitType = (resR > 0.5) ? "LOCK_TRAIL" : ((resR > -0.3) ? "BE" : "SL");
+
+      int idx = FindContext(t.symbol);
+      if(idx >= 0)
+      {
+         m_ctx[idx].nClosed++;
+         m_ctx[idx].sumR   += resR;
+         m_ctx[idx].sumMFE += t.mfe;
+         m_ctx[idx].sumMAE += t.mae;
+         if(exitType == "TP")              m_ctx[idx].nTP++;
+         else if(exitType == "LOCK_TRAIL") m_ctx[idx].nLock++;
+         else if(exitType == "BE")         m_ctx[idx].nBE++;
+         else if(exitType == "SL")         m_ctx[idx].nSL++;
+         else                              m_ctx[idx].nOther++;
+      }
+      Log(StringFormat("%s : trade clos (%s) %.2fR, MFE %.2fR, MAE %.2fR", t.symbol, exitType, resR, t.mfe, t.mae));
+
+      if(!m_logEnabled) return;
+      int h = FileOpen(m_logFile, FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_COMMON, ';');
+      if(h == INVALID_HANDLE) { Log("journal : impossible d'ouvrir " + m_logFile); return; }
+      if(FileSize(h) == 0)
+         FileWrite(h, "open_time", "close_time", "symbol", "dir", "confirmation", "sweep", "zone_htf",
+                   "sl_atr", "room_r", "entry", "r0", "exit", "exit_type", "result_r", "mfe_r", "mae_r", "net");
+      FileSeek(h, 0, SEEK_END);
+      int dg = (int)SymbolInfoInteger(t.symbol, SYMBOL_DIGITS);
+      FileWrite(h, TimeToString(t.openTime), TimeToString(exitTime), t.symbol, (t.dir == 1 ? "BUY" : "SELL"),
+                (t.confType == 1 ? "ENGULF" : (t.confType == 2 ? "CHOCH" : "?")), (t.swept ? "1" : "0"), (t.inZone ? "1" : "0"),
+                DoubleToString(t.slATR, 2), DoubleToString(t.roomR, 2), DoubleToString(t.entry, dg), DoubleToString(t.R0, dg),
+                DoubleToString(exitPrice, dg), exitType, DoubleToString(resR, 2), DoubleToString(t.mfe, 2),
+                DoubleToString(t.mae, 2), DoubleToString(net, 2));
+      FileClose(h);
+   }
+
    void ManagePositions()
    {
       for(int i = PositionsTotal() - 1; i >= 0; i--)
       {
          ulong ticket = PositionGetTicket(i);
          if(ticket == 0 || PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
-         if(ModifyThrottled(ticket)) continue;
 
          string sym   = PositionGetString(POSITION_SYMBOL);
          bool   isBuy = ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
@@ -1524,6 +1788,8 @@ private:
          if(!SymbolInfoTick(sym, tk) || tk.bid <= 0 || tk.ask <= 0) continue;
          double price = isBuy ? tk.bid : tk.ask;
          double rNow  = isBuy ? (tk.bid - open) / R0 : (open - tk.ask) / R0;
+         UpdateExcursion(id, rNow);
+         if(ModifyThrottled(ticket)) continue;           // (deplace apres le suivi d'excursion)
 
          double cand = sl;
          if(InpUseBreakEven && rNow >= InpBETriggerR)
