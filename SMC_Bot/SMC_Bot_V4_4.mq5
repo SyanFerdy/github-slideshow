@@ -1,12 +1,12 @@
 ﻿﻿//+------------------------------------------------------------------+
-//|                                                SMC_Bot_V4_3.mq5  |
+//|                                                SMC_Bot_V4_4.mq5  |
 //|   Bot SMC multi-symboles - OB 5 étoiles                          |
 //|   Sweep de liquidité + déplacement + BOS + FVG + OB vierge        |
 //|   Discount/Premium HTF, entrée à profondeur d'OB, confirmation    |
 //|   LTF, SL structurel, gestion R-Based, profils par classe d'actif |
 //+------------------------------------------------------------------+
-#property copyright "SMC Bot V4.3"
-#property version   "4.30"
+#property copyright "SMC Bot V4.4"
+#property version   "4.40"
 #property description "OB 5 étoiles : sweep de liquidité, déplacement, BOS, FVG, OB vierge, discount/premium HTF."
 #property description "Confirmation CHoCH/engulfing LTF, SL au-delà de l'extrême, place jusqu'à la liquidité opposée."
 #property description "Exécution robuste : retries, vérification SL/TP après exécution, netting, cotations figées."
@@ -65,6 +65,12 @@ input double   InpPDLevel          = 0.5;        // Limite discount/premium (0.5
 input bool     InpOBSessionFilter  = false;      // OB formé pendant la session (hors crypto)
 input double   InpTouchDepth       = 0.5;        // Profondeur d'entrée dans l'OB (0 = bord, 0.5 = moitié)
 input int      InpATRPeriod        = 14;         // Période ATR (MTF)
+
+input group "=== Zones Offre/Demande H4 (confluence) ==="
+input bool     InpUseHTFZoneFilter = false;      // ★ Exiger que l'OB H1 soit dans une zone H4 (désactivé = comportement V4.3)
+input int      InpHTFZoneLookback  = 120;        // Bougies HTF analysées pour les zones (120 H4 ≈ 4 semaines)
+input double   InpHTFZoneDisplacementATR = 1.0;  // Corps min. de l'impulsion qui crée la zone (x ATR HTF)
+input double   InpHTFZoneToleranceATR    = 0.25; // Tolérance autour de la zone (x ATR HTF)
 
 input group "=== Confirmation LTF ==="
 input bool     InpAllowEngulfing   = true;       // Accepter un engulfing dans la zone
@@ -157,13 +163,13 @@ input int      InpTesterMinTrades  = 100;        // Trades min pour le critère 
 //+------------------------------------------------------------------+
 void Log(const string msg)
 {
-   if(InpVerbose) Print("[SMC4.3] ", msg);
+   if(InpVerbose) Print("[SMC4.4] ", msg);
 }
 
 void Notify(const string msg)
 {
-   Print("[SMC4.3] ", msg);
-   if(InpSendPush && !MQLInfoInteger(MQL_TESTER)) SendNotification("SMC4.3 " + msg);
+   Print("[SMC4.4] ", msg);
+   if(InpSendPush && !MQLInfoInteger(MQL_TESTER)) SendNotification("SMC4.4 " + msg);
 }
 
 double NormalizePrice(const string sym, double price)
@@ -236,11 +242,12 @@ struct SOrderBlock
    double   fvgHigh;
    double   fvgLow;
    bool     swept;       // l'OB a pris de la liquidité
+   bool     inHTFZone;   // l'OB est dans une zone d'offre/demande HTF
 
    void Reset()
    {
       valid = false; direction = 0; high = 0; low = 0; extreme = 0; touchLevel = 0;
-      time = 0; fvgHigh = 0; fvgLow = 0; swept = false;
+      time = 0; fvgHigh = 0; fvgLow = 0; swept = false; inHTFZone = false;
    }
 };
 
@@ -341,12 +348,24 @@ public:
    datetime         newsCheckTime;
    bool             newsBlocked;
 
+   // Zones d'offre/demande HTF (utilisées seulement si InpUseHTFZoneFilter)
+   int              atrHTFHandle;
+   double           htfATR;
+   double           zoneHigh[40];
+   double           zoneLow[40];
+   datetime         zoneTime[40];     // heure de clôture de l'impulsion qui a créé la zone
+   int              zoneCount;
+   bool             zonesReady;       // au moins un calcul réussi
+   bool             zonesPending;     // recalcul demandé (nouvelle bougie HTF)
+
    CSymbolContext()
    {
       symbol = ""; atrHandle = INVALID_HANDLE; ready = false;
       bias = 0; htfHigh = 0; htfLow = 0;
       lastHTFBar = 0; lastMTFBar = 0; lastLTFBar = 0; lastUsedOBTime = 0;
       newsCheckTime = 0; newsBlocked = false;
+      atrHTFHandle = INVALID_HANDLE; htfATR = 0; zoneCount = 0; zonesReady = false; zonesPending = false;
+      for(int i = 0; i < 40; i++) { zoneHigh[i] = 0; zoneLow[i] = 0; zoneTime[i] = 0; }
       ResetSetup();
    }
 
@@ -526,13 +545,88 @@ public:
 class CSignalEngine
 {
 public:
-   double GetATR(CSymbolContext &c)
+   // ATR MTF de la dernière bougie clôturée
+   double GetATR(CSymbolContext &c) { return ATRFromHandle(c.atrHandle); }
+
+   double ATRFromHandle(int handle)
    {
-      if(c.atrHandle == INVALID_HANDLE) return 0;
-      if(BarsCalculated(c.atrHandle) < InpATRPeriod + 2) return 0;
+      if(handle == INVALID_HANDLE) return 0;
+      if(BarsCalculated(handle) < InpATRPeriod + 2) return 0;
       double buf[];
-      if(CopyBuffer(c.atrHandle, 0, 1, 1, buf) != 1) return 0;
+      if(CopyBuffer(handle, 0, 1, 1, buf) != 1) return 0;
       return buf[0];
+   }
+
+   // Zones d'offre (biais -1) ou de demande (biais +1) sur le HTF, bougies clôturées uniquement.
+   // Zone = dernière bougie opposée avant une impulsion qui clôture au-delà d'elle (corps >= X ATR HTF).
+   // Zone supprimée dès qu'une bougie HTF clôture à travers elle. Retourne false si données indisponibles.
+   bool HTFZones(CSymbolContext &c)
+   {
+      c.zoneCount = 0;
+      if(c.bias == 0) return true;
+      double atr = ATRFromHandle(c.atrHTFHandle);
+      if(atr <= 0) return false;
+      c.htfATR = atr;
+
+      MqlRates r[];
+      ArraySetAsSeries(r, false);                       // r[0] = plus ancienne
+      int n = CopyRates(c.symbol, InpHTF, 1, InpHTFZoneLookback, r);
+      if(n < 20) return false;
+      int last = n - 1;
+      int hp   = PeriodSeconds(InpHTF);
+
+      for(int k = last - 1; k >= 0 && c.zoneCount < 40; k--)   // des plus récentes aux plus anciennes
+      {
+         int    dLimit = MathMin(k + InpDisplacementBars, last);
+         int    dispEnd = -1;
+         double maxBody = 0;
+         if(c.bias == 1)
+         {
+            if(r[k].close >= r[k].open)         continue;   // bougie baissière
+            if(r[k + 1].close <= r[k + 1].open) continue;   // dernière avant l'impulsion
+            for(int j = k + 1; j <= dLimit; j++)
+            {
+               maxBody = MathMax(maxBody, r[j].close - r[j].open);
+               if(r[j].close > r[k].high) { dispEnd = j; break; }
+            }
+            if(dispEnd < 0 || maxBody < InpHTFZoneDisplacementATR * atr) continue;
+            bool broken = false;
+            for(int t = dispEnd + 1; t <= last; t++) if(r[t].close < r[k].low) { broken = true; break; }
+            if(broken) continue;
+         }
+         else
+         {
+            if(r[k].close <= r[k].open)         continue;   // bougie haussière
+            if(r[k + 1].close >= r[k + 1].open) continue;
+            for(int j = k + 1; j <= dLimit; j++)
+            {
+               maxBody = MathMax(maxBody, r[j].open - r[j].close);
+               if(r[j].close < r[k].low) { dispEnd = j; break; }
+            }
+            if(dispEnd < 0 || maxBody < InpHTFZoneDisplacementATR * atr) continue;
+            bool broken = false;
+            for(int t = dispEnd + 1; t <= last; t++) if(r[t].close > r[k].high) { broken = true; break; }
+            if(broken) continue;
+         }
+         c.zoneHigh[c.zoneCount] = r[k].high;
+         c.zoneLow[c.zoneCount]  = r[k].low;
+         c.zoneTime[c.zoneCount] = (datetime)((long)r[dispEnd].time + hp);
+         c.zoneCount++;
+      }
+      return true;
+   }
+
+   // L'OB [zL ; zH] chevauche-t-il une zone HTF (± tolérance) formée AVANT l'OB ?
+   // (une zone née de la même impulsion que l'OB ne compte pas : ce serait un doublon du filtre de déplacement)
+   int MatchHTFZone(CSymbolContext &c, double zH, double zL, datetime obTime)
+   {
+      double tol = InpHTFZoneToleranceATR * c.htfATR;
+      for(int i = 0; i < c.zoneCount; i++)
+      {
+         if(c.zoneTime[i] > obTime) continue;
+         if(c.zoneLow[i] - tol <= zH && c.zoneHigh[i] + tol >= zL) return i;
+      }
+      return -1;
    }
 
    // Biais HTF = sens du dernier BOS. Range HTF = du dernier swing opposé à l'extrême atteint depuis.
@@ -591,6 +685,7 @@ public:
       int need    = InpMaxOBAgeBars + MathMax(InpStructureBars, sweepLB + 1) + InpDisplacementBars + 5;
       double atr = GetATR(c);
       if(atr <= 0) return -1;
+      if(InpUseHTFZoneFilter && !c.zonesReady) return -1;     // zones HTF pas encore calculées
 
       MqlRates r[];
       ArraySetAsSeries(r, false);                       // r[0] = plus ancienne, r[n-1] = dernière clôturée
@@ -666,9 +761,17 @@ public:
             // ★ Discount : le niveau d'entrée doit être sous l'équilibre du range HTF
             if(InpUsePremiumDiscount && rangeOk && touch > eq) continue;
 
+            // ★ Confluence : OB H1 dans une zone de demande H4 formée avant lui
+            bool inZone = false;
+            if(InpUseHTFZoneFilter)
+            {
+               if(MatchHTFZone(c, zH, zL, r[k].time) < 0) continue;
+               inZone = true;
+            }
+
             out.valid = true; out.direction = 1; out.high = zH; out.low = zL;
             out.extreme = extreme; out.touchLevel = touch; out.time = r[k].time;
-            out.fvgHigh = fH; out.fvgLow = fL; out.swept = swept;
+            out.fvgHigh = fH; out.fvgLow = fL; out.swept = swept; out.inHTFZone = inZone;
             return 1;
          }
          else
@@ -710,9 +813,17 @@ public:
             // ★ Premium : le niveau d'entrée doit être au-dessus de l'équilibre du range HTF
             if(InpUsePremiumDiscount && rangeOk && touch < eq) continue;
 
+            // ★ Confluence : OB H1 dans une zone d'offre H4 formée avant lui
+            bool inZone = false;
+            if(InpUseHTFZoneFilter)
+            {
+               if(MatchHTFZone(c, zH, zL, r[k].time) < 0) continue;
+               inZone = true;
+            }
+
             out.valid = true; out.direction = -1; out.high = zH; out.low = zL;
             out.extreme = extreme; out.touchLevel = touch; out.time = r[k].time;
-            out.fvgHigh = fH; out.fvgLow = fL; out.swept = swept;
+            out.fvgHigh = fH; out.fvgLow = fL; out.swept = swept; out.inHTFZone = inZone;
             return 1;
          }
       }
@@ -817,10 +928,10 @@ public:
       AddSymbol(InpTradeUSDJPY, InpNameUSDJPY);
       AddSymbol(InpTradeAUDUSD, InpNameAUDUSD);
 
-      if(m_count == 0) { Print("[SMC4.3] Aucun symbole valide : vérifie les noms (suffixes broker)"); return false; }
+      if(m_count == 0) { Print("[SMC4.4] Aucun symbole valide : vérifie les noms (suffixes broker)"); return false; }
 
       ENUM_ACCOUNT_MARGIN_MODE mm = (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
-      Print("[SMC4.3] Compte ", (mm == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING ? "hedging" : "netting"),
+      Print("[SMC4.4] Compte ", (mm == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING ? "hedging" : "netting"),
             " - ", m_count, " symbole(s) actif(s)");
       return true;
    }
@@ -828,7 +939,10 @@ public:
    void Deinit()
    {
       for(int i = 0; i < m_count; i++)
-         if(m_ctx[i].atrHandle != INVALID_HANDLE) { IndicatorRelease(m_ctx[i].atrHandle); m_ctx[i].atrHandle = INVALID_HANDLE; }
+      {
+         if(m_ctx[i].atrHandle != INVALID_HANDLE)    { IndicatorRelease(m_ctx[i].atrHandle);    m_ctx[i].atrHandle = INVALID_HANDLE; }
+         if(m_ctx[i].atrHTFHandle != INVALID_HANDLE) { IndicatorRelease(m_ctx[i].atrHTFHandle); m_ctx[i].atrHTFHandle = INVALID_HANDLE; }
+      }
    }
 
    void Process()
@@ -863,19 +977,19 @@ public:
          if(pnl >= 0) { gp[idx] += pnl; wins[idx]++; } else gl[idx] += -pnl;
       }
 
-      Print("[SMC4.3] ===== Rapport par symbole =====");
+      Print("[SMC4.4] ===== Rapport par symbole =====");
       for(int i = 0; i < m_count; i++)
       {
          double pf = (gl[i] > 0) ? gp[i] / gl[i] : (gp[i] > 0 ? 999.0 : 0.0);
          double wr = (cnt[i] > 0) ? 100.0 * wins[i] / cnt[i] : 0.0;
          string verdict = (cnt[i] < 30) ? "échantillon trop petit" : (pf >= 1.5 ? "OK" : "< 1.5");
-         Print(StringFormat("[SMC4.3] %-10s trades=%d  winrate=%.1f%%  PF=%.2f  net=%.2f  %s",
+         Print(StringFormat("[SMC4.4] %-10s trades=%d  winrate=%.1f%%  PF=%.2f  net=%.2f  %s",
                m_ctx[i].symbol, cnt[i], wr, pf, gp[i] - gl[i], verdict));
       }
    }
 
 private:
-   bool Fail(const string msg) { Print("[SMC4.3] Paramètre invalide : ", msg); return false; }
+   bool Fail(const string msg) { Print("[SMC4.4] Paramètre invalide : ", msg); return false; }
 
    bool ValidateInputs()
    {
@@ -886,6 +1000,8 @@ private:
       if(InpStructureBars < 1 || InpDisplacementBars < 1 || InpSweepLookback < 2) return Fail("structure / déplacement / sweep");
       if(InpSwingStrength < 1 || InpLTFSwingStrength < 1 || InpHTFLookback < 50)  return Fail("swings / lookback HTF");
       if(InpATRPeriod < 2 || InpDisplacementATR < 0)                     return Fail("ATR");
+      if(InpUseHTFZoneFilter && (InpHTFZoneLookback < 20 || InpHTFZoneDisplacementATR < 0 || InpHTFZoneToleranceATR < 0))
+         return Fail("zones HTF : lookback >= 20, impulsion et tolérance >= 0");
       if(InpTouchDepth < 0 || InpTouchDepth > 1)                         return Fail("profondeur d'entrée entre 0 et 1");
       if(InpPDLevel <= 0 || InpPDLevel >= 1)                             return Fail("niveau discount/premium entre 0 et 1");
       if(InpFX_RR <= 0 || InpGOLD_RR <= 0 || InpIDX_RR <= 0 || InpCRY_RR <= 0) return Fail("RR <= 0");
@@ -914,17 +1030,31 @@ private:
       string sym = name;
       StringTrimLeft(sym); StringTrimRight(sym);
       if(sym == "") return;
-      if(FindContext(sym) >= 0) { Print("[SMC4.3] ", sym, " déjà ajouté, doublon ignoré"); return; }
-      if(!SymbolSelect(sym, true)) { Print("[SMC4.3] Symbole introuvable : ", sym, " (vérifie le nom/suffixe du broker)"); return; }
+      if(FindContext(sym) >= 0) { Print("[SMC4.4] ", sym, " déjà ajouté, doublon ignoré"); return; }
+      if(!SymbolSelect(sym, true)) { Print("[SMC4.4] Symbole introuvable : ", sym, " (vérifie le nom/suffixe du broker)"); return; }
 
       int handle = iATR(sym, InpMTF, InpATRPeriod);
-      if(handle == INVALID_HANDLE) { Print("[SMC4.3] Impossible de créer l'ATR pour ", sym); return; }
+      if(handle == INVALID_HANDLE) { Print("[SMC4.4] Impossible de créer l'ATR pour ", sym); return; }
+
+      // ATR HTF : créé uniquement si le filtre de zones HTF est actif
+      int handleHTF = INVALID_HANDLE;
+      if(InpUseHTFZoneFilter)
+      {
+         handleHTF = iATR(sym, InpHTF, InpATRPeriod);
+         if(handleHTF == INVALID_HANDLE)
+         {
+            Print("[SMC4.4] Impossible de créer l'ATR HTF pour ", sym);
+            IndicatorRelease(handle);
+            return;
+         }
+      }
 
       int idx = m_count;
       ArrayResize(m_ctx, m_count + 1);
       m_count++;
-      m_ctx[idx].symbol    = sym;
-      m_ctx[idx].atrHandle = handle;
+      m_ctx[idx].symbol       = sym;
+      m_ctx[idx].atrHandle    = handle;
+      m_ctx[idx].atrHTFHandle = handleHTF;
       CProfileManager::Get(sym, m_ctx[idx].profile);
       m_ctx[idx].ready     = true;
 
@@ -934,7 +1064,7 @@ private:
       CopyRates(sym, InpMTF, 0, InpMaxOBAgeBars + 50, tmp);
       CopyRates(sym, InpLTF, 0, 100, tmp);
 
-      Print(StringFormat("[SMC4.3] %s ajouté - profil %s : RR=%.1f, marge SL=%.2f ATR, SL %.1f-%.1f ATR, spread max=%.0f%% du SL, session=%s",
+      Print(StringFormat("[SMC4.4] %s ajouté - profil %s : RR=%.1f, marge SL=%.2f ATR, SL %.1f-%.1f ATR, spread max=%.0f%% du SL, session=%s",
             sym, CProfileManager::ClassName(m_ctx[idx].profile.assetClass), m_ctx[idx].profile.rewardRatio,
             m_ctx[idx].profile.slBufferATR, m_ctx[idx].profile.minSLATR, m_ctx[idx].profile.maxSLATR,
             m_ctx[idx].profile.maxSpreadPct, (m_ctx[idx].profile.useSession ? "oui" : "non")));
@@ -974,9 +1104,23 @@ private:
          {
             Log(StringFormat("%s : biais HTF %d -> %d", sym, c.bias, nb));
             if(c.state != SETUP_IDLE && c.ob.direction != nb) c.ResetSetup();
+            if(InpUseHTFZoneFilter) { c.zonesReady = false; c.zoneCount = 0; }   // zones de l'ancien sens : inutilisables
          }
          c.bias = nb; c.htfHigh = rh; c.htfLow = rl;
+         if(InpUseHTFZoneFilter) c.zonesPending = true;
          c.lastMTFBar = 0;                                   // nouveau contexte : on rescanne les OB
+      }
+
+      // 1b) Zones d'offre/demande HTF (si le filtre est actif). En cas d'échec, on réessaie au tick suivant
+      //     sans bloquer un setup déjà en attente de confirmation.
+      if(InpUseHTFZoneFilter && c.zonesPending)
+      {
+         if(m_engine.HTFZones(c))
+         {
+            c.zonesPending = false;
+            c.zonesReady   = true;
+            Log(StringFormat("%s : %d zone(s) %s HTF valide(s)", sym, c.zoneCount, c.bias == 1 ? "de demande" : (c.bias == -1 ? "d'offre" : "")));
+         }
       }
       if(c.bias == 0) return;
 
@@ -989,10 +1133,11 @@ private:
          if(res == 1)
          {
             if(!c.ob.valid || found.time != c.ob.time)
-               Log(StringFormat("%s : OB %s armé [%s - %s] du %s, entrée à %s, invalidation %s%s",
+               Log(StringFormat("%s : OB %s armé [%s - %s] du %s, entrée à %s, invalidation %s%s%s",
                    sym, found.direction == 1 ? "haussier" : "baissier",
                    PriceStr(sym, found.low), PriceStr(sym, found.high), TimeToString(found.time),
-                   PriceStr(sym, found.touchLevel), PriceStr(sym, found.extreme), found.swept ? " (sweep)" : ""));
+                   PriceStr(sym, found.touchLevel), PriceStr(sym, found.extreme), found.swept ? " (sweep)" : "",
+                   found.inHTFZone ? " (zone HTF)" : ""));
             c.ob    = found;
             c.state = SETUP_WATCHING;
          }
@@ -1247,7 +1392,7 @@ private:
       string sym = c.symbol;
       int    dir = c.ob.direction;
       m_trade.SetTypeFillingBySymbol(sym);
-      string comment = StringFormat("SMC4.3 %s RR%.1f", dir == 1 ? "BUY" : "SELL", c.profile.rewardRatio);
+      string comment = StringFormat("SMC4.4 %s RR%.1f", dir == 1 ? "BUY" : "SELL", c.profile.rewardRatio);
 
       for(int attempt = 1; attempt <= InpOrderRetries; attempt++)
       {
