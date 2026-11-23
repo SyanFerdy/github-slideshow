@@ -1,20 +1,20 @@
-﻿﻿//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
 //|                                                SMC_Bot_V4_4.mq5  |
-//|   Bot SMC multi-symboles - OB 5 étoiles                          |
-//|   Sweep de liquidité + déplacement + BOS + FVG + OB vierge        |
-//|   Discount/Premium HTF, entrée à profondeur d'OB, confirmation    |
+//|   Bot SMC multi-symboles - OB 5 etoiles                          |
+//|   Sweep de liquidite + deplacement + BOS + FVG + OB vierge        |
+//|   Discount/Premium HTF, entree a profondeur d'OB, confirmation    |
 //|   LTF, SL structurel, gestion R-Based, profils par classe d'actif |
 //+------------------------------------------------------------------+
 #property copyright "SMC Bot V4.4"
 #property version   "4.40"
-#property description "OB 5 étoiles : sweep de liquidité, déplacement, BOS, FVG, OB vierge, discount/premium HTF."
-#property description "Confirmation CHoCH/engulfing LTF, SL au-delà de l'extrême, place jusqu'à la liquidité opposée."
-#property description "Exécution robuste : retries, vérification SL/TP après exécution, netting, cotations figées."
+#property description "OB 5 etoiles : sweep de liquidite, deplacement, BOS, FVG, OB vierge, discount/premium HTF."
+#property description "Confirmation CHoCH/engulfing LTF, SL au-dela de l'extreme, place jusqu'a la liquidite opposee."
+#property description "Execution robuste : retries, verification SL/TP apres execution, netting, cotations figees."
 
 #include <Trade\Trade.mqh>
 
 //+------------------------------------------------------------------+
-//| ÉNUMÉRATIONS                                                     |
+//| ENUMERATIONS                                                     |
 //+------------------------------------------------------------------+
 enum ENUM_ASSET_CLASS
 {
@@ -26,64 +26,64 @@ enum ENUM_ASSET_CLASS
 
 enum ENUM_SETUP_STATE
 {
-   SETUP_IDLE     = 0,   // Aucun OB armé
-   SETUP_WATCHING = 1,   // OB armé, on attend que le prix atteigne le niveau d'entrée
+   SETUP_IDLE     = 0,   // Aucun OB arme
+   SETUP_WATCHING = 1,   // OB arme, on attend que le prix atteigne le niveau d'entree
    SETUP_IN_ZONE  = 2,   // Prix dans l'OB, on attend la confirmation LTF
    SETUP_IN_TRADE = 3    // Position ouverte
 };
 
 //+------------------------------------------------------------------+
-//| PARAMÈTRES D'ENTRÉE                                              |
+//| PARAMETRES D'ENTREE                                              |
 //+------------------------------------------------------------------+
 input group "=== Gestion du Risque Global ==="
 input double   InpRiskPercent      = 1.0;      // Risque par trade (% du capital)
 input double   InpMaxTotalRisk     = 3.0;      // Risque total ouvert maximum (%)
 input double   InpMaxDrawdown      = 10.0;     // Drawdown max depuis le plus haut d'equity (%)
-input int      InpMaxOpenTrades    = 3;        // Nombre max de trades simultanés
-input double   InpMaxDailyLoss     = 3.0;      // Perte journalière max (%) - 0 = désactivé
-input bool     InpResetPeakEquity  = false;    // Réinitialiser le plus haut d'equity au démarrage
+input int      InpMaxOpenTrades    = 3;        // Nombre max de trades simultanes
+input double   InpMaxDailyLoss     = 3.0;      // Perte journaliere max (%) - 0 = desactive
+input bool     InpResetPeakEquity  = false;    // Reinitialiser le plus haut d'equity au demarrage
 
 input group "=== Timeframes (MTF) ==="
-input ENUM_TIMEFRAMES InpHTF       = PERIOD_H4;  // Timeframe supérieur (Biais)
-input ENUM_TIMEFRAMES InpMTF       = PERIOD_H1;  // Timeframe intermédiaire (OB/FVG)
-input ENUM_TIMEFRAMES InpLTF       = PERIOD_M15; // Timeframe inférieur (Confirmation)
+input ENUM_TIMEFRAMES InpHTF       = PERIOD_H4;  // Timeframe superieur (Biais)
+input ENUM_TIMEFRAMES InpMTF       = PERIOD_H1;  // Timeframe intermediaire (OB/FVG)
+input ENUM_TIMEFRAMES InpLTF       = PERIOD_M15; // Timeframe inferieur (Confirmation)
 
 input group "=== Structure HTF (Biais + Range) ==="
-input int      InpSwingStrength    = 3;          // Force des swings HTF (bougies de chaque côté)
-input int      InpHTFLookback      = 200;        // Bougies HTF analysées
+input int      InpSwingStrength    = 3;          // Force des swings HTF (bougies de chaque cote)
+input int      InpHTFLookback      = 200;        // Bougies HTF analysees
 
-input group "=== Filtres OB 5 Étoiles ==="
-input int      InpMaxOBAgeBars     = 50;         // Âge maximum de l'OB (bougies MTF)
-input int      InpStructureBars    = 10;         // Le déplacement doit casser l'extrême des N bougies avant l'OB (BOS)
-input int      InpDisplacementBars = 3;          // Nombre max de bougies pour le déplacement
-input double   InpDisplacementATR  = 1.0;        // Corps min. d'une bougie du déplacement (x ATR)
-input bool     InpRequireFVG       = true;       // ★ Exiger un FVG dans le déplacement
-input bool     InpRequireSweep     = true;       // ★ Exiger une prise de liquidité par l'OB
-input int      InpSweepLookback    = 10;         // Bougies avant l'OB dont l'extrême doit être balayé
-input bool     InpUsePremiumDiscount = true;     // ★ Acheter en discount / vendre en premium (range HTF)
-input double   InpPDLevel          = 0.5;        // Limite discount/premium (0.5 = équilibre)
-input bool     InpOBSessionFilter  = false;      // OB formé pendant la session (hors crypto)
-input double   InpTouchDepth       = 0.5;        // Profondeur d'entrée dans l'OB (0 = bord, 0.5 = moitié)
-input int      InpATRPeriod        = 14;         // Période ATR (MTF)
+input group "=== Filtres OB 5 Etoiles ==="
+input int      InpMaxOBAgeBars     = 50;         // Age maximum de l'OB (bougies MTF)
+input int      InpStructureBars    = 10;         // Le deplacement doit casser l'extreme des N bougies avant l'OB (BOS)
+input int      InpDisplacementBars = 3;          // Nombre max de bougies pour le deplacement
+input double   InpDisplacementATR  = 1.0;        // Corps min. d'une bougie du deplacement (x ATR)
+input bool     InpRequireFVG       = true;       // * Exiger un FVG dans le deplacement
+input bool     InpRequireSweep     = true;       // * Exiger une prise de liquidite par l'OB
+input int      InpSweepLookback    = 10;         // Bougies avant l'OB dont l'extreme doit etre balaye
+input bool     InpUsePremiumDiscount = true;     // * Acheter en discount / vendre en premium (range HTF)
+input double   InpPDLevel          = 0.5;        // Limite discount/premium (0.5 = equilibre)
+input bool     InpOBSessionFilter  = false;      // OB forme pendant la session (hors crypto)
+input double   InpTouchDepth       = 0.5;        // Profondeur d'entree dans l'OB (0 = bord, 0.5 = moitie)
+input int      InpATRPeriod        = 14;         // Periode ATR (MTF)
 
 input group "=== Zones Offre/Demande H4 (confluence) ==="
-input bool     InpUseHTFZoneFilter = false;      // ★ Exiger que l'OB H1 soit dans une zone H4 (désactivé = comportement V4.3)
-input int      InpHTFZoneLookback  = 120;        // Bougies HTF analysées pour les zones (120 H4 ≈ 4 semaines)
-input double   InpHTFZoneDisplacementATR = 1.0;  // Corps min. de l'impulsion qui crée la zone (x ATR HTF)
-input double   InpHTFZoneToleranceATR    = 0.25; // Tolérance autour de la zone (x ATR HTF)
+input bool     InpUseHTFZoneFilter = false;      // * Exiger que l'OB H1 soit dans une zone H4 (desactive = comportement V4.3)
+input int      InpHTFZoneLookback  = 120;        // Bougies HTF analysees pour les zones (120 H4 ~ 4 semaines)
+input double   InpHTFZoneDisplacementATR = 1.0;  // Corps min. de l'impulsion qui cree la zone (x ATR HTF)
+input double   InpHTFZoneToleranceATR    = 0.25; // Tolerance autour de la zone (x ATR HTF)
 
 input group "=== Confirmation LTF ==="
 input bool     InpAllowEngulfing   = true;       // Accepter un engulfing dans la zone
 input int      InpLTFSwingStrength = 2;          // Force des swings LTF (CHoCH)
-input int      InpConfirmMaxBars   = 12;         // Bougies LTF max pour confirmer après le toucher
+input int      InpConfirmMaxBars   = 12;         // Bougies LTF max pour confirmer apres le toucher
 
 input group "=== Objectif ==="
-input bool     InpUseRoomFilter    = true;       // Exiger de la place jusqu'à la liquidité HTF opposée
+input bool     InpUseRoomFilter    = true;       // Exiger de la place jusqu'a la liquidite HTF opposee
 input double   InpMinRoomR         = 1.5;        // Place minimale (en R)
 
-input group "=== Symboles à Trader ==="
+input group "=== Symboles a Trader ==="
 input bool     InpTradeEURUSD      = true;       // Trader EURUSD
-input string   InpNameEURUSD       = "EURUSD";   // Nom broker EURUSD (suffixe éventuel)
+input string   InpNameEURUSD       = "EURUSD";   // Nom broker EURUSD (suffixe eventuel)
 input bool     InpTradeXAUUSD      = true;       // Trader XAUUSD
 input string   InpNameXAUUSD       = "XAUUSD";   // Nom broker XAUUSD
 input bool     InpTradeUS30        = true;       // Trader US30
@@ -99,64 +99,64 @@ input string   InpNameAUDUSD       = "AUDUSD";   // Nom broker AUDUSD
 
 input group "=== Profil FOREX ==="
 input double   InpFX_RR            = 2.0;        // Ratio R:R
-input double   InpFX_SLBufferATR   = 0.25;       // Marge du SL au-delà de l'OB (x ATR)
-input double   InpFX_MaxSLATR      = 2.0;        // SL maximum (x ATR) sinon trade refusé
+input double   InpFX_SLBufferATR   = 0.25;       // Marge du SL au-dela de l'OB (x ATR)
+input double   InpFX_MaxSLATR      = 2.0;        // SL maximum (x ATR) sinon trade refuse
 input double   InpFX_MaxSpreadPct  = 10.0;       // Spread max (% de la distance du SL)
 
 input group "=== Profil OR (XAU) ==="
 input double   InpGOLD_RR          = 3.0;        // Ratio R:R
-input double   InpGOLD_SLBufferATR = 0.35;       // Marge du SL au-delà de l'OB (x ATR)
+input double   InpGOLD_SLBufferATR = 0.35;       // Marge du SL au-dela de l'OB (x ATR)
 input double   InpGOLD_MaxSLATR    = 2.5;        // SL maximum (x ATR)
 input double   InpGOLD_MaxSpreadPct= 12.0;       // Spread max (% du SL)
 
 input group "=== Profil INDICES (US30, US100...) ==="
 input double   InpIDX_RR           = 2.5;        // Ratio R:R
-input double   InpIDX_SLBufferATR  = 0.35;       // Marge du SL au-delà de l'OB (x ATR)
+input double   InpIDX_SLBufferATR  = 0.35;       // Marge du SL au-dela de l'OB (x ATR)
 input double   InpIDX_MaxSLATR     = 2.5;        // SL maximum (x ATR)
 input double   InpIDX_MaxSpreadPct = 12.0;       // Spread max (% du SL)
 
 input group "=== Profil CRYPTO (BTC, ETH) ==="
 input double   InpCRY_RR           = 2.0;        // Ratio R:R
-input double   InpCRY_SLBufferATR  = 0.40;       // Marge du SL au-delà de l'OB (x ATR)
+input double   InpCRY_SLBufferATR  = 0.40;       // Marge du SL au-dela de l'OB (x ATR)
 input double   InpCRY_MaxSLATR     = 3.0;        // SL maximum (x ATR)
 input double   InpCRY_MaxSpreadPct = 15.0;       // Spread max (% du SL)
-input bool     InpCRY_UseSession   = false;      // Appliquer le filtre de session à la crypto
+input bool     InpCRY_UseSession   = false;      // Appliquer le filtre de session a la crypto
 
 input group "=== SL minimum (tous profils) ==="
-input double   InpMinSLATR         = 0.5;        // SL minimum (x ATR) - évite les SL dans le bruit
+input double   InpMinSLATR         = 0.5;        // SL minimum (x ATR) - evite les SL dans le bruit
 
 input group "=== Notifications ==="
 input bool     InpSendPush         = true;       // Envoyer notifications push
-input bool     InpVerbose          = true;       // Journal détaillé
+input bool     InpVerbose          = true;       // Journal detaille
 
 input group "=== Gestion R-Based (Trade) ==="
 input bool     InpUseBreakEven     = true;       // Break-Even
-input double   InpBETriggerR       = 1.0;        // Déclenchement du Break-Even (en R)
-input double   InpBEOffsetR        = 0.05;       // SL placé à Entrée + X R (couvre spread/commission)
+input double   InpBETriggerR       = 1.0;        // Declenchement du Break-Even (en R)
+input double   InpBEOffsetR        = 0.05;       // SL place a Entree + X R (couvre spread/commission)
 input bool     InpUseRLock         = true;       // Verrouiller des gains
 input double   InpRLockThreshold   = 1.5;        // Seuil de verrouillage (en R)
-input double   InpRLockLevelR      = 1.0;        // Gain verrouillé (en R)
-input bool     InpUseDynamicTrail  = true;       // Trailing dynamique après le seuil de lock
+input double   InpRLockLevelR      = 1.0;        // Gain verrouille (en R)
+input bool     InpUseDynamicTrail  = true;       // Trailing dynamique apres le seuil de lock
 input double   InpTrailDistanceR   = 0.8;        // Distance du trailing (en R)
-input double   InpTrailStepR       = 0.1;        // Pas minimum de déplacement (en R)
+input double   InpTrailStepR       = 0.1;        // Pas minimum de deplacement (en R)
 
-input group "=== Filtres de Sécurité ==="
+input group "=== Filtres de Securite ==="
 input bool     InpUseSessionFilter = true;       // Activer le filtre de session
-input int      InpSessionStartHour = 8;          // Heure début (serveur)
+input int      InpSessionStartHour = 8;          // Heure debut (serveur)
 input int      InpSessionEndHour   = 20;         // Heure fin (serveur)
-input int      InpFridayLastEntryHour = 18;      // Vendredi : pas d'entrée après cette heure (-1 = désactivé, hors crypto)
-input bool     InpUseCorrelationFilter = true;   // Activer filtre de corrélation
-input double   InpCorrelationThreshold = 0.7;    // Seuil de corrélation (rendements H1)
+input int      InpFridayLastEntryHour = 18;      // Vendredi : pas d'entree apres cette heure (-1 = desactive, hors crypto)
+input bool     InpUseCorrelationFilter = true;   // Activer filtre de correlation
+input double   InpCorrelationThreshold = 0.7;    // Seuil de correlation (rendements H1)
 input bool     InpUseNewsFilter    = true;       // Activer filtre de news (live uniquement)
 input int      InpNewsMinutesBefore= 15;         // Minutes avant la news
-input int      InpNewsMinutesAfter = 15;         // Minutes après la news
+input int      InpNewsMinutesAfter = 15;         // Minutes apres la news
 
 input group "=== Configuration Technique ==="
 input int      InpMagicNumber      = 20241006;   // Magic Number
 input int      InpSlippage         = 30;         // Slippage max (points)
-input int      InpOrderRetries     = 3;          // Tentatives d'envoi d'ordre (requote, prix changé...)
-input int      InpMaxQuoteAgeSec   = 120;        // Cotation plus vieille = marché fermé, pas d'entrée
-input int      InpTesterMinTrades  = 100;        // Trades min pour le critère d'optimisation
+input int      InpOrderRetries     = 3;          // Tentatives d'envoi d'ordre (requote, prix change...)
+input int      InpMaxQuoteAgeSec   = 120;        // Cotation plus vieille = marche ferme, pas d'entree
+input int      InpTesterMinTrades  = 100;        // Trades min pour le critere d'optimisation
 
 //+------------------------------------------------------------------+
 //| OUTILS                                                           |
@@ -193,7 +193,7 @@ int VolumeDigits(double step)
    return d;
 }
 
-// Distance minimale imposée par le broker pour SL/TP (stops level / freeze level)
+// Distance minimale imposee par le broker pour SL/TP (stops level / freeze level)
 double MinStopDistance(const string sym)
 {
    double point = SymbolInfoDouble(sym, SYMBOL_POINT);
@@ -201,7 +201,7 @@ double MinStopDistance(const string sym)
                   (double)SymbolInfoInteger(sym, SYMBOL_TRADE_FREEZE_LEVEL)) * point;
 }
 
-// Vrai une seule fois par nouvelle bougie. 'last' mémorise l'heure de la dernière bougie vue.
+// Vrai une seule fois par nouvelle bougie. 'last' memorise l'heure de la derniere bougie vue.
 bool IsNewBar(const string sym, ENUM_TIMEFRAMES tf, datetime &last)
 {
    datetime t = iTime(sym, tf, 0);
@@ -236,12 +236,12 @@ struct SOrderBlock
    int      direction;   // 1 = haussier (demande), -1 = baissier (offre)
    double   high;        // zone de l'OB
    double   low;
-   double   extreme;     // extrême à protéger (OB ou mèche du sweep) -> base du SL et invalidation
-   double   touchLevel;  // niveau d'entrée (profondeur dans l'OB)
+   double   extreme;     // extreme a proteger (OB ou meche du sweep) -> base du SL et invalidation
+   double   touchLevel;  // niveau d'entree (profondeur dans l'OB)
    datetime time;        // heure d'ouverture de la bougie OB
    double   fvgHigh;
    double   fvgLow;
-   bool     swept;       // l'OB a pris de la liquidité
+   bool     swept;       // l'OB a pris de la liquidite
    bool     inHTFZone;   // l'OB est dans une zone d'offre/demande HTF
 
    void Reset()
@@ -263,7 +263,7 @@ public:
       StringToUpper(s);
       if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0) return ASSET_GOLD;
       if(StringFind(s, "BTC") >= 0 || StringFind(s, "ETH") >= 0)  return ASSET_CRYPTO;
-      // Forex : devise de base ET devise de cotation fiat (évite que USDJPY soit pris pour un indice "DJ")
+      // Forex : devise de base ET devise de cotation fiat (evite que USDJPY soit pris pour un indice "DJ")
       if(IsFiat(SymbolInfoString(symbol, SYMBOL_CURRENCY_BASE)) && IsFiat(SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT)) &&
          SymbolInfoString(symbol, SYMBOL_CURRENCY_BASE) != SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT))
          return ASSET_FOREX;
@@ -323,7 +323,7 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| CLASSE : CONTEXTE PAR SYMBOLE (état + handles)                   |
+//| CLASSE : CONTEXTE PAR SYMBOLE (etat + handles)                   |
 //+------------------------------------------------------------------+
 class CSymbolContext
 {
@@ -343,20 +343,20 @@ public:
    datetime         lastHTFBar;
    datetime         lastMTFBar;
    datetime         lastLTFBar;
-   datetime         lastUsedOBTime;   // OB déjà consommé (tradé, invalidé ou expiré)
+   datetime         lastUsedOBTime;   // OB deja consomme (trade, invalide ou expire)
 
    datetime         newsCheckTime;
    bool             newsBlocked;
 
-   // Zones d'offre/demande HTF (utilisées seulement si InpUseHTFZoneFilter)
+   // Zones d'offre/demande HTF (utilisees seulement si InpUseHTFZoneFilter)
    int              atrHTFHandle;
    double           htfATR;
    double           zoneHigh[40];
    double           zoneLow[40];
-   datetime         zoneTime[40];     // heure de clôture de l'impulsion qui a créé la zone
+   datetime         zoneTime[40];     // heure de cloture de l'impulsion qui a cree la zone
    int              zoneCount;
-   bool             zonesReady;       // au moins un calcul réussi
-   bool             zonesPending;     // recalcul demandé (nouvelle bougie HTF)
+   bool             zonesReady;       // au moins un calcul reussi
+   bool             zonesPending;     // recalcul demande (nouvelle bougie HTF)
 
    CSymbolContext()
    {
@@ -390,7 +390,7 @@ private:
    string   m_gvPeak;
    string   m_gvDayEq;
    string   m_gvDayId;
-   bool     m_persist;      // faux dans le testeur : chaque passe d'optimisation repart de zéro
+   bool     m_persist;      // faux dans le testeur : chaque passe d'optimisation repart de zero
 
    long DayId() { return (long)(TimeCurrent() / 86400); }
 
@@ -409,7 +409,7 @@ public:
       if(m_persist && !InpResetPeakEquity && GlobalVariableGet(m_gvPeak, stored) && stored > eq) m_peakEquity = stored;
       if(m_persist) GlobalVariableSet(m_gvPeak, m_peakEquity);
 
-      // Equity de début de journée : conservée si l'EA redémarre dans la même journée
+      // Equity de debut de journee : conservee si l'EA redemarre dans la meme journee
       MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
       m_dayOfYear      = dt.day_of_year;
       m_dayStartEquity = eq;
@@ -468,7 +468,7 @@ public:
       return count;
    }
 
-   // Argent réellement en risque : seulement la partie SL du côté perdant.
+   // Argent reellement en risque : seulement la partie SL du cote perdant.
    double OpenRiskMoney()
    {
       double total   = 0;
@@ -493,7 +493,7 @@ public:
    {
       if(CountOpenTrades() >= InpMaxOpenTrades) { why = "nombre max de trades atteint"; return false; }
       if(InpMaxDailyLoss > 0 && DailyLossPct() >= InpMaxDailyLoss)
-      { why = StringFormat("perte journalière %.2f%% >= %.2f%%", DailyLossPct(), InpMaxDailyLoss); return false; }
+      { why = StringFormat("perte journaliere %.2f%% >= %.2f%%", DailyLossPct(), InpMaxDailyLoss); return false; }
       double balance = AccountInfoDouble(ACCOUNT_BALANCE);
       if(OpenRiskMoney() >= balance * InpMaxTotalRisk / 100.0) { why = "risque total max atteint"; return false; }
       return true;
@@ -512,7 +512,7 @@ public:
 
       ENUM_ORDER_TYPE ot = (dir == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
       double pnl = 0;
-      if(!OrderCalcProfit(ot, sym, 1.0, entry, sl, pnl) || pnl >= 0) { why = "OrderCalcProfit a échoué"; return 0; }
+      if(!OrderCalcProfit(ot, sym, 1.0, entry, sl, pnl) || pnl >= 0) { why = "OrderCalcProfit a echoue"; return 0; }
       double lossPerLot = -pnl;
 
       double minLot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
@@ -520,12 +520,12 @@ public:
       double step   = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
       double limit  = SymbolInfoDouble(sym, SYMBOL_VOLUME_LIMIT);   // 0 = pas de limite
       if(step <= 0) step = minLot;
-      if(step <= 0 || minLot <= 0) { why = "paramètres de volume invalides"; return 0; }
+      if(step <= 0 || minLot <= 0) { why = "parametres de volume invalides"; return 0; }
 
       double lots = MathFloor(riskMoney / lossPerLot / step + 1e-9) * step;
       if(lots < minLot - 1e-9)
       {
-         why = StringFormat("lot calculé %.4f < lot min %.4f (capital trop faible pour ce SL)", lots, minLot);
+         why = StringFormat("lot calcule %.4f < lot min %.4f (capital trop faible pour ce SL)", lots, minLot);
          return 0;
       }
       if(maxLot > 0) lots = MathMin(lots, maxLot);
@@ -533,19 +533,19 @@ public:
       lots = NormalizeDouble(lots, VolumeDigits(step));
 
       double margin = 0;
-      if(!OrderCalcMargin(ot, sym, lots, entry, margin)) { why = "OrderCalcMargin a échoué"; return 0; }
+      if(!OrderCalcMargin(ot, sym, lots, entry, margin)) { why = "OrderCalcMargin a echoue"; return 0; }
       if(margin > AccountInfoDouble(ACCOUNT_MARGIN_FREE) * 0.9) { why = "marge libre insuffisante"; return 0; }
       return lots;
    }
 };
 
 //+------------------------------------------------------------------+
-//| CLASSE : DÉTECTION SMC                                           |
+//| CLASSE : DETECTION SMC                                           |
 //+------------------------------------------------------------------+
 class CSignalEngine
 {
 public:
-   // ATR MTF de la dernière bougie clôturée
+   // ATR MTF de la derniere bougie cloturee
    double GetATR(CSymbolContext &c) { return ATRFromHandle(c.atrHandle); }
 
    double ATRFromHandle(int handle)
@@ -557,34 +557,34 @@ public:
       return buf[0];
    }
 
-   // Zones d'offre (biais -1) ou de demande (biais +1) sur le HTF, bougies clôturées uniquement.
-   // Zone = dernière bougie opposée avant une impulsion qui clôture au-delà d'elle (corps >= X ATR HTF).
-   // Zone supprimée dès qu'une bougie HTF clôture à travers elle. Retourne false si données indisponibles.
+   // Zones d'offre (biais -1) ou de demande (biais +1) sur le HTF, bougies cloturees uniquement.
+   // Zone = derniere bougie opposee avant une impulsion qui cloture au-dela d'elle (corps >= X ATR HTF).
+   // Zone supprimee des qu'une bougie HTF cloture a travers elle. Retourne false si donnees indisponibles.
    bool HTFZones(CSymbolContext &c)
    {
       if(c.bias == 0) { c.zoneCount = 0; return true; }
       double atr = ATRFromHandle(c.atrHTFHandle);
-      if(atr <= 0) return false;                        // échec : on garde les zones précédentes
+      if(atr <= 0) return false;                        // echec : on garde les zones precedentes
 
       MqlRates r[];
       ArraySetAsSeries(r, false);                       // r[0] = plus ancienne
       int n = CopyRates(c.symbol, InpHTF, 1, InpHTFZoneLookback, r);
-      if(n < 20) return false;                          // échec : on garde les zones précédentes
+      if(n < 20) return false;                          // echec : on garde les zones precedentes
 
       c.htfATR    = atr;
-      c.zoneCount = 0;                                  // données OK : on reconstruit la liste
+      c.zoneCount = 0;                                  // donnees OK : on reconstruit la liste
       int last = n - 1;
       int hp   = PeriodSeconds(InpHTF);
 
-      for(int k = last - 1; k >= 0 && c.zoneCount < 40; k--)   // des plus récentes aux plus anciennes
+      for(int k = last - 1; k >= 0 && c.zoneCount < 40; k--)   // des plus recentes aux plus anciennes
       {
          int    dLimit = MathMin(k + InpDisplacementBars, last);
          int    dispEnd = -1;
          double maxBody = 0;
          if(c.bias == 1)
          {
-            if(r[k].close >= r[k].open)         continue;   // bougie baissière
-            if(r[k + 1].close <= r[k + 1].open) continue;   // dernière avant l'impulsion
+            if(r[k].close >= r[k].open)         continue;   // bougie baissiere
+            if(r[k + 1].close <= r[k + 1].open) continue;   // derniere avant l'impulsion
             for(int j = k + 1; j <= dLimit; j++)
             {
                maxBody = MathMax(maxBody, r[j].close - r[j].open);
@@ -597,7 +597,7 @@ public:
          }
          else
          {
-            if(r[k].close <= r[k].open)         continue;   // bougie haussière
+            if(r[k].close <= r[k].open)         continue;   // bougie haussiere
             if(r[k + 1].close >= r[k + 1].open) continue;
             for(int j = k + 1; j <= dLimit; j++)
             {
@@ -617,8 +617,8 @@ public:
       return true;
    }
 
-   // L'OB [zL ; zH] chevauche-t-il une zone HTF (± tolérance) formée AVANT l'OB ?
-   // (une zone née de la même impulsion que l'OB ne compte pas : ce serait un doublon du filtre de déplacement)
+   // L'OB [zL ; zH] chevauche-t-il une zone HTF (+/- tolerance) formee AVANT l'OB ?
+   // (une zone nee de la meme impulsion que l'OB ne compte pas : ce serait un doublon du filtre de deplacement)
    int MatchHTFZone(CSymbolContext &c, double zH, double zL, datetime obTime)
    {
       double tol = InpHTFZoneToleranceATR * c.htfATR;
@@ -630,13 +630,13 @@ public:
       return -1;
    }
 
-   // Biais HTF = sens du dernier BOS. Range HTF = du dernier swing opposé à l'extrême atteint depuis.
-   // Retourne false si les données ne sont pas prêtes.
+   // Biais HTF = sens du dernier BOS. Range HTF = du dernier swing oppose a l'extreme atteint depuis.
+   // Retourne false si les donnees ne sont pas pretes.
    bool HTFBias(const string sym, int &bias, double &rangeHigh, double &rangeLow)
    {
       bias = 0; rangeHigh = 0; rangeLow = 0;
       int s = MathMax(1, InpSwingStrength);
-      // CopyRates déclenche lui-même le chargement de l'historique ; on juge sur le nombre reçu
+      // CopyRates declenche lui-meme le chargement de l'historique ; on juge sur le nombre recu
       MqlRates r[];
       ArraySetAsSeries(r, false);                       // r[0] = plus ancienne
       int n = CopyRates(sym, InpHTF, 1, InpHTFLookback, r);
@@ -647,7 +647,7 @@ public:
       bool   shBroken = true, slBroken = true;
       for(int i = 2 * s; i < n; i++)
       {
-         int k = i - s;                                 // swing confirmé à la bougie i
+         int k = i - s;                                 // swing confirme a la bougie i
          bool isSH = true, isSL = true;
          for(int j = 1; j <= s; j++)
          {
@@ -674,8 +674,8 @@ public:
       return true;
    }
 
-   // Cherche l'OB 5 étoiles le plus récent dans le sens du biais.
-   // Retour : 1 = trouvé, 0 = aucun, -1 = données indisponibles
+   // Cherche l'OB 5 etoiles le plus recent dans le sens du biais.
+   // Retour : 1 = trouve, 0 = aucun, -1 = donnees indisponibles
    int FindFreshOB(CSymbolContext &c, SOrderBlock &out)
    {
       out.Reset();
@@ -686,10 +686,10 @@ public:
       int need    = InpMaxOBAgeBars + MathMax(InpStructureBars, sweepLB + 1) + InpDisplacementBars + 5;
       double atr = GetATR(c);
       if(atr <= 0) return -1;
-      if(InpUseHTFZoneFilter && !c.zonesReady) return -1;     // zones HTF pas encore calculées
+      if(InpUseHTFZoneFilter && !c.zonesReady) return -1;     // zones HTF pas encore calculees
 
       MqlRates r[];
-      ArraySetAsSeries(r, false);                       // r[0] = plus ancienne, r[n-1] = dernière clôturée
+      ArraySetAsSeries(r, false);                       // r[0] = plus ancienne, r[n-1] = derniere cloturee
       int n = CopyRates(c.symbol, InpMTF, 1, need, r);
       if(n < need / 2) return -1;
 
@@ -704,7 +704,7 @@ public:
 
       for(int k = last - 1; k >= kMin; k--)
       {
-         int age = last - k + 1;                        // bougies MTF écoulées depuis l'OB
+         int age = last - k + 1;                        // bougies MTF ecoulees depuis l'OB
          if(age > InpMaxOBAgeBars) break;
          if(r[k].time == c.lastUsedOBTime) continue;
 
@@ -721,18 +721,18 @@ public:
 
          if(bias == 1)
          {
-            // ★ OB haussier = dernière bougie baissière avant l'impulsion
+            // * OB haussier = derniere bougie baissiere avant l'impulsion
             if(r[k].close >= r[k].open)         continue;
             if(r[k + 1].close <= r[k + 1].open) continue;
 
-            // ★ Sweep : l'OB (ou la bougie précédente) a balayé le plus bas des N bougies d'avant
+            // * Sweep : l'OB (ou la bougie precedente) a balaye le plus bas des N bougies d'avant
             double sweepLow = MathMin(r[k].low, r[k - 1].low);
             double preMin   = DBL_MAX;
             for(int p = k - 1 - sweepLB; p <= k - 2; p++) preMin = MathMin(preMin, r[p].low);
             bool swept = (sweepLow < preMin);
             if(InpRequireSweep && !swept) continue;
 
-            // ★ Déplacement + BOS
+            // * Deplacement + BOS
             double structHigh = r[k].high;
             for(int s = k - InpStructureBars; s < k; s++) structHigh = MathMax(structHigh, r[s].high);
             for(int j = k + 1; j <= dLimit; j++)
@@ -742,7 +742,7 @@ public:
             }
             if(dispEnd < 0 || maxBody < InpDisplacementATR * atr) continue;
 
-            // ★ FVG de même sens créé par le déplacement
+            // * FVG de meme sens cree par le deplacement
             for(int m = k + 1; m <= MathMin(dispEnd + 1, last - 1); m++)
                if(r[m + 1].low > r[m - 1].high) { fvg = true; fL = r[m - 1].high; fH = r[m + 1].low; fvgEnd = m + 1; break; }
             if(InpRequireFVG && !fvg) continue;
@@ -751,18 +751,18 @@ public:
             double touch   = zH - InpTouchDepth * (zH - zL);
             double extreme = swept ? MathMin(zL, sweepLow) : zL;
 
-            // ★ OB vierge : aucune bougie clôturée après le déplacement n'a atteint le niveau d'entrée
+            // * OB vierge : aucune bougie cloturee apres le deplacement n'a atteint le niveau d'entree
             int startCheck = MathMax(dispEnd, fvgEnd) + 1;
             bool fresh = true;
             for(int t = startCheck; t <= last; t++)
                if(r[t].low <= touch) { fresh = false; break; }
             if(!fresh) continue;
-            if(bid < extreme) continue;                         // invalidé
+            if(bid < extreme) continue;                         // invalide
 
-            // ★ Discount : le niveau d'entrée doit être sous l'équilibre du range HTF
+            // * Discount : le niveau d'entree doit etre sous l'equilibre du range HTF
             if(InpUsePremiumDiscount && rangeOk && touch > eq) continue;
 
-            // ★ Confluence : OB H1 dans une zone de demande H4 formée avant lui
+            // * Confluence : OB H1 dans une zone de demande H4 formee avant lui
             bool inZone = false;
             if(InpUseHTFZoneFilter)
             {
@@ -777,7 +777,7 @@ public:
          }
          else
          {
-            // ★ OB baissier = dernière bougie haussière avant l'impulsion
+            // * OB baissier = derniere bougie haussiere avant l'impulsion
             if(r[k].close <= r[k].open)         continue;
             if(r[k + 1].close >= r[k + 1].open) continue;
 
@@ -811,10 +811,10 @@ public:
             if(!fresh) continue;
             if(bid > extreme) continue;
 
-            // ★ Premium : le niveau d'entrée doit être au-dessus de l'équilibre du range HTF
+            // * Premium : le niveau d'entree doit etre au-dessus de l'equilibre du range HTF
             if(InpUsePremiumDiscount && rangeOk && touch < eq) continue;
 
-            // ★ Confluence : OB H1 dans une zone d'offre H4 formée avant lui
+            // * Confluence : OB H1 dans une zone d'offre H4 formee avant lui
             bool inZone = false;
             if(InpUseHTFZoneFilter)
             {
@@ -831,20 +831,20 @@ public:
       return 0;
    }
 
-   // Confirmation sur bougies LTF CLÔTURÉES. Retour : 1 = confirmé, 0 = non, -1 = données indisponibles
+   // Confirmation sur bougies LTF CLOTUREES. Retour : 1 = confirme, 0 = non, -1 = donnees indisponibles
    int ConfirmLTF(CSymbolContext &c)
    {
       int s    = MathMax(1, InpLTFSwingStrength);
       int need = InpConfirmMaxBars + 2 * s + 30;
       MqlRates r[];
-      ArraySetAsSeries(r, true);                        // r[0] = dernière bougie clôturée
+      ArraySetAsSeries(r, true);                        // r[0] = derniere bougie cloturee
       int n = CopyRates(c.symbol, InpLTF, 1, need, r);
       if(n < 2 * s + 5) return -1;
 
       int    dir = c.ob.direction;
       double zH  = c.ob.high, zL = c.ob.low;
 
-      // 1) Engulfing au contact de la zone, clôture qui reste du bon côté de l'extrême
+      // 1) Engulfing au contact de la zone, cloture qui reste du bon cote de l'extreme
       if(InpAllowEngulfing)
       {
          if(dir == 1 && r[0].close > r[0].open && r[1].close < r[1].open &&
@@ -857,7 +857,7 @@ public:
             return 1;
       }
 
-      // 2) CHoCH : première clôture au-delà du dernier swing LTF formé pendant le retour vers l'OB
+      // 2) CHoCH : premiere cloture au-dela du dernier swing LTF forme pendant le retour vers l'OB
       datetime minTime = (datetime)((long)c.touchTime - (long)PeriodSeconds(InpLTF) * 20);
       for(int i = s + 1; i < n - s; i++)
       {
@@ -897,7 +897,7 @@ private:
    int             m_count;
    string          m_gvPrefix;
    datetime        m_lastCleanup;
-   ulong           m_failTicket[];     // anti-spam des modifications refusées
+   ulong           m_failTicket[];     // anti-spam des modifications refusees
    datetime        m_failTime[];
 
 public:
@@ -914,7 +914,7 @@ public:
       m_trade.LogLevel(LOG_LEVEL_ERRORS);
       m_risk.Init(InpMagicNumber);
       m_gvPrefix    = "SMC42_" + IntegerToString(InpMagicNumber) + "_R_";
-      // Testeur : les identifiants de position recommencent à chaque passe, on purge les anciens 1R
+      // Testeur : les identifiants de position recommencent a chaque passe, on purge les anciens 1R
       if(MQLInfoInteger(MQL_TESTER)) GlobalVariablesDeleteAll(m_gvPrefix);
       m_lastCleanup = 0;
       ArrayResize(m_failTicket, 0); ArrayResize(m_failTime, 0);
@@ -929,7 +929,7 @@ public:
       AddSymbol(InpTradeUSDJPY, InpNameUSDJPY);
       AddSymbol(InpTradeAUDUSD, InpNameAUDUSD);
 
-      if(m_count == 0) { Print("[SMC4.4] Aucun symbole valide : vérifie les noms (suffixes broker)"); return false; }
+      if(m_count == 0) { Print("[SMC4.4] Aucun symbole valide : verifie les noms (suffixes broker)"); return false; }
 
       ENUM_ACCOUNT_MARGIN_MODE mm = (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
       Print("[SMC4.4] Compte ", (mm == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING ? "hedging" : "netting"),
@@ -949,13 +949,13 @@ public:
    void Process()
    {
       m_risk.Update();
-      ManagePositions();                         // toujours, même hors session
+      ManagePositions();                         // toujours, meme hors session
       for(int i = 0; i < m_count; i++) ProcessSymbol(m_ctx[i]);
 
       if(TimeCurrent() - m_lastCleanup > 300) { CleanupGlobals(); m_lastCleanup = TimeCurrent(); }
    }
 
-   // Rapport par symbole (PF, winrate) : affiché à l'arrêt de l'EA / fin du backtest
+   // Rapport par symbole (PF, winrate) : affiche a l'arret de l'EA / fin du backtest
    void PrintReport()
    {
       if(m_count == 0 || !HistorySelect(0, TimeCurrent())) return;
@@ -983,44 +983,44 @@ public:
       {
          double pf = (gl[i] > 0) ? gp[i] / gl[i] : (gp[i] > 0 ? 999.0 : 0.0);
          double wr = (cnt[i] > 0) ? 100.0 * wins[i] / cnt[i] : 0.0;
-         string verdict = (cnt[i] < 30) ? "échantillon trop petit" : (pf >= 1.5 ? "OK" : "< 1.5");
+         string verdict = (cnt[i] < 30) ? "echantillon trop petit" : (pf >= 1.5 ? "OK" : "< 1.5");
          Print(StringFormat("[SMC4.4] %-10s trades=%d  winrate=%.1f%%  PF=%.2f  net=%.2f  %s",
                m_ctx[i].symbol, cnt[i], wr, pf, gp[i] - gl[i], verdict));
       }
    }
 
 private:
-   bool Fail(const string msg) { Print("[SMC4.4] Paramètre invalide : ", msg); return false; }
+   bool Fail(const string msg) { Print("[SMC4.4] Parametre invalide : ", msg); return false; }
 
    bool ValidateInputs()
    {
       if(PeriodSeconds(InpHTF) <= PeriodSeconds(InpMTF) || PeriodSeconds(InpMTF) <= PeriodSeconds(InpLTF)) return Fail("il faut HTF > MTF > LTF");
       if(InpRiskPercent <= 0 || InpRiskPercent > InpMaxTotalRisk)        return Fail("0 < risque par trade <= risque total");
-      if(InpMaxDrawdown <= 0 || InpMaxDailyLoss < 0)                     return Fail("drawdown / perte journalière");
+      if(InpMaxDrawdown <= 0 || InpMaxDailyLoss < 0)                     return Fail("drawdown / perte journaliere");
       if(InpMaxOpenTrades <= 0 || InpMaxOBAgeBars <= 0 || InpConfirmMaxBars <= 0) return Fail("compteurs <= 0");
-      if(InpStructureBars < 1 || InpDisplacementBars < 1 || InpSweepLookback < 2) return Fail("structure / déplacement / sweep");
+      if(InpStructureBars < 1 || InpDisplacementBars < 1 || InpSweepLookback < 2) return Fail("structure / deplacement / sweep");
       if(InpSwingStrength < 1 || InpLTFSwingStrength < 1 || InpHTFLookback < 50)  return Fail("swings / lookback HTF");
       if(InpATRPeriod < 2 || InpDisplacementATR < 0)                     return Fail("ATR");
       if(InpUseHTFZoneFilter && (InpHTFZoneLookback < 20 || InpHTFZoneDisplacementATR < 0 || InpHTFZoneToleranceATR < 0))
-         return Fail("zones HTF : lookback >= 20, impulsion et tolérance >= 0");
-      if(InpTouchDepth < 0 || InpTouchDepth > 1)                         return Fail("profondeur d'entrée entre 0 et 1");
+         return Fail("zones HTF : lookback >= 20, impulsion et tolerance >= 0");
+      if(InpTouchDepth < 0 || InpTouchDepth > 1)                         return Fail("profondeur d'entree entre 0 et 1");
       if(InpPDLevel <= 0 || InpPDLevel >= 1)                             return Fail("niveau discount/premium entre 0 et 1");
       if(InpFX_RR <= 0 || InpGOLD_RR <= 0 || InpIDX_RR <= 0 || InpCRY_RR <= 0) return Fail("RR <= 0");
       if(InpMinSLATR <= 0)                                               return Fail("SL minimum");
       if(InpFX_MaxSLATR <= InpMinSLATR || InpGOLD_MaxSLATR <= InpMinSLATR ||
-         InpIDX_MaxSLATR <= InpMinSLATR || InpCRY_MaxSLATR <= InpMinSLATR) return Fail("SL max doit être > SL min");
+         InpIDX_MaxSLATR <= InpMinSLATR || InpCRY_MaxSLATR <= InpMinSLATR) return Fail("SL max doit etre > SL min");
       if(InpSessionStartHour < 0 || InpSessionStartHour > 23 || InpSessionEndHour < 0 || InpSessionEndHour > 24) return Fail("heures de session");
-      if(InpUseSessionFilter && InpSessionStartHour == InpSessionEndHour) return Fail("début et fin de session identiques (aucune heure autorisée)");
+      if(InpUseSessionFilter && InpSessionStartHour == InpSessionEndHour) return Fail("debut et fin de session identiques (aucune heure autorisee)");
       if(InpFridayLastEntryHour > 24)                                    return Fail("heure limite du vendredi");
-      if(InpCorrelationThreshold <= 0 || InpCorrelationThreshold > 1)    return Fail("seuil de corrélation entre 0 et 1");
+      if(InpCorrelationThreshold <= 0 || InpCorrelationThreshold > 1)    return Fail("seuil de correlation entre 0 et 1");
       if(InpBETriggerR <= 0 || InpRLockThreshold <= 0 || InpTrailDistanceR <= 0 || InpTrailStepR < 0) return Fail("gestion R");
-      if(InpUseRLock && InpRLockLevelR >= InpRLockThreshold)             return Fail("gain verrouillé doit être < seuil de lock");
-      if(InpBEOffsetR >= InpBETriggerR)                                  return Fail("offset BE doit être < déclenchement BE");
-      if(InpOrderRetries < 1 || InpMaxQuoteAgeSec < 10)                  return Fail("retries / âge de cotation");
-      if(InpSlippage < 0 || InpNewsMinutesBefore < 0 || InpNewsMinutesAfter < 0) return Fail("slippage / minutes de news négatifs");
+      if(InpUseRLock && InpRLockLevelR >= InpRLockThreshold)             return Fail("gain verrouille doit etre < seuil de lock");
+      if(InpBEOffsetR >= InpBETriggerR)                                  return Fail("offset BE doit etre < declenchement BE");
+      if(InpOrderRetries < 1 || InpMaxQuoteAgeSec < 10)                  return Fail("retries / age de cotation");
+      if(InpSlippage < 0 || InpNewsMinutesBefore < 0 || InpNewsMinutesAfter < 0) return Fail("slippage / minutes de news negatifs");
       if(InpMaxTotalRisk > 100 || InpMaxDrawdown > 100 || InpMaxDailyLoss > 100)  return Fail("pourcentage > 100");
       if(InpUseRoomFilter && InpMinRoomR <= 0)                           return Fail("place minimale (R) <= 0");
-      if(InpFX_SLBufferATR < 0 || InpGOLD_SLBufferATR < 0 || InpIDX_SLBufferATR < 0 || InpCRY_SLBufferATR < 0) return Fail("marge SL négative");
+      if(InpFX_SLBufferATR < 0 || InpGOLD_SLBufferATR < 0 || InpIDX_SLBufferATR < 0 || InpCRY_SLBufferATR < 0) return Fail("marge SL negative");
       if(InpFX_MaxSpreadPct <= 0 || InpGOLD_MaxSpreadPct <= 0 || InpIDX_MaxSpreadPct <= 0 || InpCRY_MaxSpreadPct <= 0) return Fail("spread max <= 0");
       return true;
    }
@@ -1031,20 +1031,20 @@ private:
       string sym = name;
       StringTrimLeft(sym); StringTrimRight(sym);
       if(sym == "") return;
-      if(FindContext(sym) >= 0) { Print("[SMC4.4] ", sym, " déjà ajouté, doublon ignoré"); return; }
-      if(!SymbolSelect(sym, true)) { Print("[SMC4.4] Symbole introuvable : ", sym, " (vérifie le nom/suffixe du broker)"); return; }
+      if(FindContext(sym) >= 0) { Print("[SMC4.4] ", sym, " deja ajoute, doublon ignore"); return; }
+      if(!SymbolSelect(sym, true)) { Print("[SMC4.4] Symbole introuvable : ", sym, " (verifie le nom/suffixe du broker)"); return; }
 
       int handle = iATR(sym, InpMTF, InpATRPeriod);
-      if(handle == INVALID_HANDLE) { Print("[SMC4.4] Impossible de créer l'ATR pour ", sym); return; }
+      if(handle == INVALID_HANDLE) { Print("[SMC4.4] Impossible de creer l'ATR pour ", sym); return; }
 
-      // ATR HTF : créé uniquement si le filtre de zones HTF est actif
+      // ATR HTF : cree uniquement si le filtre de zones HTF est actif
       int handleHTF = INVALID_HANDLE;
       if(InpUseHTFZoneFilter)
       {
          handleHTF = iATR(sym, InpHTF, InpATRPeriod);
          if(handleHTF == INVALID_HANDLE)
          {
-            Print("[SMC4.4] Impossible de créer l'ATR HTF pour ", sym);
+            Print("[SMC4.4] Impossible de creer l'ATR HTF pour ", sym);
             IndicatorRelease(handle);
             return;
          }
@@ -1059,13 +1059,13 @@ private:
       CProfileManager::Get(sym, m_ctx[idx].profile);
       m_ctx[idx].ready     = true;
 
-      // Préchargement de l'historique (déclenche le téléchargement si nécessaire)
+      // Prechargement de l'historique (declenche le telechargement si necessaire)
       MqlRates tmp[];
       CopyRates(sym, InpHTF, 0, InpHTFLookback, tmp);
       CopyRates(sym, InpMTF, 0, InpMaxOBAgeBars + 50, tmp);
       CopyRates(sym, InpLTF, 0, 100, tmp);
 
-      Print(StringFormat("[SMC4.4] %s ajouté - profil %s : RR=%.1f, marge SL=%.2f ATR, SL %.1f-%.1f ATR, spread max=%.0f%% du SL, session=%s",
+      Print(StringFormat("[SMC4.4] %s ajoute - profil %s : RR=%.1f, marge SL=%.2f ATR, SL %.1f-%.1f ATR, spread max=%.0f%% du SL, session=%s",
             sym, CProfileManager::ClassName(m_ctx[idx].profile.assetClass), m_ctx[idx].profile.rewardRatio,
             m_ctx[idx].profile.slBufferATR, m_ctx[idx].profile.minSLATR, m_ctx[idx].profile.maxSLATR,
             m_ctx[idx].profile.maxSpreadPct, (m_ctx[idx].profile.useSession ? "oui" : "non")));
@@ -1087,7 +1087,7 @@ private:
       return false;
    }
 
-   //--- Machine à états par symbole -------------------------------------
+   //--- Machine a etats par symbole -------------------------------------
    void ProcessSymbol(CSymbolContext &c)
    {
       if(!c.ready) return;
@@ -1096,7 +1096,7 @@ private:
       if(HasOpenPosition(sym)) { c.state = SETUP_IN_TRADE; return; }
       if(c.state == SETUP_IN_TRADE) c.ResetSetup();
 
-      // 1) Biais + range HTF, recalculés à chaque nouvelle bougie HTF
+      // 1) Biais + range HTF, recalcules a chaque nouvelle bougie HTF
       if(IsNewBar(sym, InpHTF, c.lastHTFBar))
       {
          int nb = 0; double rh = 0, rl = 0;
@@ -1112,8 +1112,8 @@ private:
          c.lastMTFBar = 0;                                   // nouveau contexte : on rescanne les OB
       }
 
-      // 1b) Zones d'offre/demande HTF (si le filtre est actif). En cas d'échec, on réessaie au tick suivant
-      //     sans bloquer un setup déjà en attente de confirmation.
+      // 1b) Zones d'offre/demande HTF (si le filtre est actif). En cas d'echec, on reessaie au tick suivant
+      //     sans bloquer un setup deja en attente de confirmation.
       if(InpUseHTFZoneFilter && c.zonesPending)
       {
          if(m_engine.HTFZones(c))
@@ -1126,7 +1126,7 @@ private:
       }
       if(c.bias == 0) return;
 
-      // 2) Recherche d'OB à chaque nouvelle bougie MTF (sauf si le prix est déjà dans la zone)
+      // 2) Recherche d'OB a chaque nouvelle bougie MTF (sauf si le prix est deja dans la zone)
       if(IsNewBar(sym, InpMTF, c.lastMTFBar) && c.state != SETUP_IN_ZONE)
       {
          SOrderBlock found;
@@ -1135,7 +1135,7 @@ private:
          if(res == 1)
          {
             if(!c.ob.valid || found.time != c.ob.time)
-               Log(StringFormat("%s : OB %s armé [%s - %s] du %s, entrée à %s, invalidation %s%s%s",
+               Log(StringFormat("%s : OB %s arme [%s - %s] du %s, entree a %s, invalidation %s%s%s",
                    sym, found.direction == 1 ? "haussier" : "baissier",
                    PriceStr(sym, found.low), PriceStr(sym, found.high), TimeToString(found.time),
                    PriceStr(sym, found.touchLevel), PriceStr(sym, found.extreme), found.swept ? " (sweep)" : "",
@@ -1146,7 +1146,7 @@ private:
          else c.ResetSetup();
       }
 
-      // 3) Attente du retour du prix au niveau d'entrée
+      // 3) Attente du retour du prix au niveau d'entree
       if(c.state == SETUP_WATCHING)
       {
          int age = iBarShift(sym, InpMTF, c.ob.time);
@@ -1165,15 +1165,15 @@ private:
          c.state      = SETUP_IN_ZONE;
          c.touchTime  = TimeCurrent();
          c.lastLTFBar = iTime(sym, InpLTF, 0);
-         Log(StringFormat("%s : niveau d'entrée atteint, attente de confirmation %s", sym, EnumToString(InpLTF)));
+         Log(StringFormat("%s : niveau d'entree atteint, attente de confirmation %s", sym, EnumToString(InpLTF)));
       }
 
-      // 4) Confirmation LTF puis entrée
+      // 4) Confirmation LTF puis entree
       if(c.state == SETUP_IN_ZONE)
       {
          if(TimeCurrent() - c.touchTime > (long)InpConfirmMaxBars * PeriodSeconds(InpLTF))
          {
-            Log(sym + " : pas de confirmation à temps, OB abandonné");
+            Log(sym + " : pas de confirmation a temps, OB abandonne");
             c.lastUsedOBTime = c.ob.time; c.ResetSetup(); return;
          }
          if(!IsNewBar(sym, InpLTF, c.lastLTFBar)) return;
@@ -1181,17 +1181,17 @@ private:
          double lastClose = iClose(sym, InpLTF, 1);
          if(lastClose > 0 && ((c.ob.direction == 1 && lastClose < c.ob.extreme) || (c.ob.direction == -1 && lastClose > c.ob.extreme)))
          {
-            Log(sym + " : clôture LTF au-delà de l'extrême, setup invalidé");
+            Log(sym + " : cloture LTF au-dela de l'extreme, setup invalide");
             c.lastUsedOBTime = c.ob.time; c.ResetSetup(); return;
          }
 
          int conf = m_engine.ConfirmLTF(c);
-         if(conf < 0) { c.lastLTFBar = 0; return; }          // données pas prêtes : on réessaiera
+         if(conf < 0) { c.lastLTFBar = 0; return; }          // donnees pas pretes : on reessaiera
          if(conf == 0) return;
          Log(sym + " : confirmation LTF obtenue");
 
          string why;
-         if(!EntryAllowed(c, why)) { Log(sym + " : entrée bloquée - " + why); return; }
+         if(!EntryAllowed(c, why)) { Log(sym + " : entree bloquee - " + why); return; }
 
          c.lastUsedOBTime = c.ob.time;
          if(TryEnter(c)) c.state = SETUP_IN_TRADE;
@@ -1203,27 +1203,27 @@ private:
    bool EntryAllowed(CSymbolContext &c, string &why)
    {
       string sym = c.symbol;
-      if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) { why = "trading automatique désactivé"; return false; }
+      if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) { why = "trading automatique desactive"; return false; }
       if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) || !AccountInfoInteger(ACCOUNT_TRADE_EXPERT)) { why = "trading interdit sur ce compte"; return false; }
 
       ENUM_SYMBOL_TRADE_MODE tm = (ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(sym, SYMBOL_TRADE_MODE);
-      if(tm == SYMBOL_TRADE_MODE_DISABLED || tm == SYMBOL_TRADE_MODE_CLOSEONLY) { why = "symbole non négociable"; return false; }
+      if(tm == SYMBOL_TRADE_MODE_DISABLED || tm == SYMBOL_TRADE_MODE_CLOSEONLY) { why = "symbole non negociable"; return false; }
       if(c.ob.direction == 1  && tm == SYMBOL_TRADE_MODE_SHORTONLY) { why = "achats interdits"; return false; }
       if(c.ob.direction == -1 && tm == SYMBOL_TRADE_MODE_LONGONLY)  { why = "ventes interdites"; return false; }
 
       MqlTick tk;
       if(!SymbolInfoTick(sym, tk) || tk.bid <= 0 || tk.ask <= 0 || tk.ask < tk.bid) { why = "cotation invalide"; return false; }
-      if(TimeCurrent() - tk.time > InpMaxQuoteAgeSec) { why = "cotation figée (marché fermé ?)"; return false; }
+      if(TimeCurrent() - tk.time > InpMaxQuoteAgeSec) { why = "cotation figee (marche ferme ?)"; return false; }
 
-      // Compte netting : une position existante (autre EA / manuelle) fusionnerait avec la nôtre
+      // Compte netting : une position existante (autre EA / manuelle) fusionnerait avec la notre
       ENUM_ACCOUNT_MARGIN_MODE mm = (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
-      if(mm != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING && PositionSelect(sym)) { why = "compte netting : position déjà ouverte sur ce symbole"; return false; }
+      if(mm != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING && PositionSelect(sym)) { why = "compte netting : position deja ouverte sur ce symbole"; return false; }
 
       if(!IsSessionOpen(c))                      { why = "hors session"; return false; }
-      if(IsFridayCutoff(c))                      { why = "vendredi après l'heure limite"; return false; }
+      if(IsFridayCutoff(c))                      { why = "vendredi apres l'heure limite"; return false; }
       if(!m_risk.CanOpenNewTrade(why))           return false;
-      if(IsNewsTime(c))                          { why = "news à fort impact"; return false; }
-      if(IsCorrelated(sym, c.ob.direction))      { why = "corrélé à une position ouverte"; return false; }
+      if(IsNewsTime(c))                          { why = "news a fort impact"; return false; }
+      if(IsCorrelated(sym, c.ob.direction))      { why = "correle a une position ouverte"; return false; }
       return true;
    }
 
@@ -1263,14 +1263,14 @@ private:
          MqlCalendarValue vals[];
          ResetLastError();
          CalendarValueHistory(vals, from, to, NULL, curs[k]);
-         int got = ArraySize(vals);                  // indépendant du type de retour de la fonction
+         int got = ArraySize(vals);                  // independant du type de retour de la fonction
          if(got == 0 && GetLastError() != 0) { Log(StringFormat("%s : calendrier indisponible (erreur %d)", c.symbol, GetLastError())); continue; }
          for(int i = 0; i < got; i++)
          {
             MqlCalendarEvent ev;
             if(CalendarEventById(vals[i].event_id, ev) && ev.importance == CALENDAR_IMPORTANCE_HIGH)
             {
-               Log(StringFormat("%s : news %s (%s) à %s", c.symbol, ev.name, curs[k], TimeToString(vals[i].time)));
+               Log(StringFormat("%s : news %s (%s) a %s", c.symbol, ev.name, curs[k], TimeToString(vals[i].time)));
                c.newsBlocked = true;
                return true;
             }
@@ -1301,14 +1301,14 @@ private:
          double corr = Correlation(sym, syms[i], PERIOD_H1, 100);
          if((dir == dirs[i] && corr >= InpCorrelationThreshold) || (dir != dirs[i] && corr <= -InpCorrelationThreshold))
          {
-            Log(StringFormat("%s : corrélation %.2f avec %s", sym, corr, syms[i]));
+            Log(StringFormat("%s : correlation %.2f avec %s", sym, corr, syms[i]));
             return true;
          }
       }
       return false;
    }
 
-   // Corrélation de Pearson des rendements logarithmiques, bougies alignées par heure
+   // Correlation de Pearson des rendements logarithmiques, bougies alignees par heure
    double Correlation(const string a, const string b, ENUM_TIMEFRAMES tf, int bars)
    {
       MqlRates ra[];
@@ -1340,8 +1340,8 @@ private:
       return cov / MathSqrt(vx * vy);
    }
 
-   //--- Exécution ---------------------------------------------------------
-   // Calcule entrée / SL / TP / lots sur la cotation actuelle. False + raison si le trade n'est pas valable.
+   //--- Execution ---------------------------------------------------------
+   // Calcule entree / SL / TP / lots sur la cotation actuelle. False + raison si le trade n'est pas valable.
    bool ComputeLevels(CSymbolContext &c, double &entry, double &sl, double &tp, double &lots, string &why)
    {
       string sym = c.symbol;
@@ -1354,25 +1354,25 @@ private:
       double spread = tk.ask - tk.bid;
       entry = (dir == 1) ? tk.ask : tk.bid;
 
-      // SL au-delà de l'extrême (OB ou mèche du sweep) + marge ATR (+ spread pour les ventes)
+      // SL au-dela de l'extreme (OB ou meche du sweep) + marge ATR (+ spread pour les ventes)
       double buffer = c.profile.slBufferATR * atr;
       sl = (dir == 1) ? c.ob.extreme - buffer : c.ob.extreme + buffer + spread;
       double risk = (dir == 1) ? entry - sl : sl - entry;
-      if(risk <= 0) { why = "prix déjà au-delà du SL structurel"; return false; }
+      if(risk <= 0) { why = "prix deja au-dela du SL structurel"; return false; }
 
       double minRisk = c.profile.minSLATR * atr;
       if(risk < minRisk) { risk = minRisk; sl = (dir == 1) ? entry - risk : entry + risk; }
       if(risk > c.profile.maxSLATR * atr)
       { why = StringFormat("SL trop large (%.2f ATR > %.2f)", risk / atr, c.profile.maxSLATR); return false; }
       if(spread > risk * c.profile.maxSpreadPct / 100.0)
-      { why = StringFormat("spread trop élevé (%.1f%% du SL)", 100.0 * spread / risk); return false; }
+      { why = StringFormat("spread trop eleve (%.1f%% du SL)", 100.0 * spread / risk); return false; }
       if(risk <= MinStopDistance(sym) + spread) { why = "SL sous la distance minimale du broker"; return false; }
 
-      // Place jusqu'à la liquidité HTF opposée (haut du range pour un achat, bas pour une vente)
+      // Place jusqu'a la liquidite HTF opposee (haut du range pour un achat, bas pour une vente)
       if(InpUseRoomFilter && c.htfHigh > c.htfLow)
       {
          double room = (dir == 1) ? c.htfHigh - entry : entry - c.htfLow;
-         if(room < InpMinRoomR * risk) { why = StringFormat("pas assez de place jusqu'à la liquidité (%.2fR)", room / risk); return false; }
+         if(room < InpMinRoomR * risk) { why = StringFormat("pas assez de place jusqu'a la liquidite (%.2fR)", room / risk); return false; }
       }
 
       tp = (dir == 1) ? entry + risk * c.profile.rewardRatio : entry - risk * c.profile.rewardRatio;
@@ -1400,14 +1400,14 @@ private:
       {
          double entry = 0, sl = 0, tp = 0, lots = 0;
          string why;
-         if(!ComputeLevels(c, entry, sl, tp, lots, why)) { Log(sym + " : trade refusé - " + why); return false; }
+         if(!ComputeLevels(c, entry, sl, tp, lots, why)) { Log(sym + " : trade refuse - " + why); return false; }
 
          bool ok = (dir == 1) ? m_trade.Buy(lots, sym, 0.0, sl, tp, comment) : m_trade.Sell(lots, sym, 0.0, sl, tp, comment);
          uint rc = m_trade.ResultRetcode();
          if(ok && (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_DONE_PARTIAL || rc == TRADE_RETCODE_PLACED))
          {
             EnsureProtection(sym, sl, c.profile.rewardRatio);
-            if(!HasOpenPosition(sym)) return false;      // fermée par EnsureProtection
+            if(!HasOpenPosition(sym)) return false;      // fermee par EnsureProtection
             Notify(StringFormat("%s %s %.2f lots @ %s | SL %s | TP %s | OB %s%s",
                    dir == 1 ? "BUY" : "SELL", sym, lots, PriceStr(sym, m_trade.ResultPrice()),
                    PriceStr(sym, sl), PriceStr(sym, tp),
@@ -1416,7 +1416,7 @@ private:
          }
          if(!IsRetryable(rc) || attempt == InpOrderRetries)
          {
-            Notify(StringFormat("Échec ordre %s %s : %u %s", dir == 1 ? "BUY" : "SELL", sym, rc, m_trade.ResultRetcodeDescription()));
+            Notify(StringFormat("Echec ordre %s %s : %u %s", dir == 1 ? "BUY" : "SELL", sym, rc, m_trade.ResultRetcodeDescription()));
             return false;
          }
          Log(StringFormat("%s : %s, nouvelle tentative %d/%d", sym, m_trade.ResultRetcodeDescription(), attempt + 1, InpOrderRetries));
@@ -1425,8 +1425,8 @@ private:
       return false;
    }
 
-   // Après exécution : vérifie que le SL est posé, recale le TP sur le prix réellement obtenu (slippage),
-   // mémorise le risque initial. Ferme la position si aucun SL ne peut être posé.
+   // Apres execution : verifie que le SL est pose, recale le TP sur le prix reellement obtenu (slippage),
+   // memorise le risque initial. Ferme la position si aucun SL ne peut etre pose.
    void EnsureProtection(const string sym, double plannedSL, double rr)
    {
       for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -1445,7 +1445,7 @@ private:
          if(risk <= 0)
          {
             m_trade.PositionClose(t);
-            Notify(sym + " : exécution au-delà du SL prévu, position fermée");
+            Notify(sym + " : execution au-dela du SL prevu, position fermee");
             continue;
          }
          double wantTP = NormalizePrice(sym, isBuy ? open + rr * risk : open - rr * risk);
@@ -1457,7 +1457,7 @@ private:
             if(!m_trade.PositionModify(t, wantSL, wantTP) && sl <= 0)
             {
                m_trade.PositionClose(t);
-               Notify(StringFormat("%s : impossible de poser le SL (%u), position fermée", sym, m_trade.ResultRetcode()));
+               Notify(StringFormat("%s : impossible de poser le SL (%u), position fermee", sym, m_trade.ResultRetcode()));
                continue;
             }
          }
@@ -1472,7 +1472,7 @@ private:
       double v = 0;
       if(GlobalVariableGet(name, v) && v > 0) return v;
 
-      int idx = FindContext(sym);                       // repli : TP = entrée ± RR x R
+      int idx = FindContext(sym);                       // repli : TP = entree +/- RR x R
       if(tp > 0 && idx >= 0 && m_ctx[idx].profile.rewardRatio > 0)
       { v = MathAbs(tp - open) / m_ctx[idx].profile.rewardRatio; GlobalVariableSet(name, v); return v; }
       if(sl > 0 && ((isBuy && sl < open) || (!isBuy && sl > open)))
@@ -1546,11 +1546,11 @@ private:
          if(!isBuy && cand - tk.ask <= minDist) continue;
 
          if(m_trade.PositionModify(ticket, cand, tp))
-            Log(StringFormat("%s : SL déplacé à %s (%.2fR en cours)", sym, PriceStr(sym, cand), rNow));
+            Log(StringFormat("%s : SL deplace a %s (%.2fR en cours)", sym, PriceStr(sym, cand), rNow));
          else
          {
             RecordModifyFail(ticket);
-            Log(StringFormat("%s : échec modification SL - %u %s", sym, m_trade.ResultRetcode(), m_trade.ResultRetcodeDescription()));
+            Log(StringFormat("%s : echec modification SL - %u %s", sym, m_trade.ResultRetcode(), m_trade.ResultRetcodeDescription()));
          }
       }
    }
@@ -1578,7 +1578,7 @@ private:
 };
 
 //+------------------------------------------------------------------+
-//| INSTANCE GLOBALE & ÉVÉNEMENTS                                    |
+//| INSTANCE GLOBALE & EVENEMENTS                                    |
 //+------------------------------------------------------------------+
 CSmcBot g_bot;
 
@@ -1600,7 +1600,7 @@ void OnDeinit(const int reason)
 void OnTick()  { g_bot.Process(); }
 void OnTimer() { g_bot.Process(); }
 
-// Critère d'optimisation ("Custom max") : PF pénalisé par le drawdown, 0 si trop peu de trades
+// Critere d'optimisation ("Custom max") : PF penalise par le drawdown, 0 si trop peu de trades
 double OnTester()
 {
    double trades = TesterStatistics(STAT_TRADES);
