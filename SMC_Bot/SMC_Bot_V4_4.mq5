@@ -562,16 +562,17 @@ public:
    // Zone supprimée dès qu'une bougie HTF clôture à travers elle. Retourne false si données indisponibles.
    bool HTFZones(CSymbolContext &c)
    {
-      c.zoneCount = 0;
-      if(c.bias == 0) return true;
+      if(c.bias == 0) { c.zoneCount = 0; return true; }
       double atr = ATRFromHandle(c.atrHTFHandle);
-      if(atr <= 0) return false;
-      c.htfATR = atr;
+      if(atr <= 0) return false;                        // échec : on garde les zones précédentes
 
       MqlRates r[];
       ArraySetAsSeries(r, false);                       // r[0] = plus ancienne
       int n = CopyRates(c.symbol, InpHTF, 1, InpHTFZoneLookback, r);
-      if(n < 20) return false;
+      if(n < 20) return false;                          // échec : on garde les zones précédentes
+
+      c.htfATR    = atr;
+      c.zoneCount = 0;                                  // données OK : on reconstruit la liste
       int last = n - 1;
       int hp   = PeriodSeconds(InpHTF);
 
@@ -1119,6 +1120,7 @@ private:
          {
             c.zonesPending = false;
             c.zonesReady   = true;
+            if(c.state != SETUP_IN_ZONE) c.lastMTFBar = 0;   // on rescanne les OB avec les nouvelles zones
             Log(StringFormat("%s : %d zone(s) %s HTF valide(s)", sym, c.zoneCount, c.bias == 1 ? "de demande" : (c.bias == -1 ? "d'offre" : "")));
          }
       }
