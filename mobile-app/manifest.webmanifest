@@ -1,0 +1,15 @@
+{
+  "name": "Polar Macro",
+  "short_name": "Polar Macro",
+  "description": "Terminal d’intelligence macro mobile, propulsé par Claude.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#070b14",
+  "theme_color": "#070b14",
+  "lang": "fr",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
