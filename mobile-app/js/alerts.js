@@ -50,6 +50,7 @@ export function remove(id) { alerts = alerts.filter(a => a.id !== id); saveAlert
 export function cancel(id) { const a = alerts.find(x => x.id === id); if (a) { a.status = 'cancelled'; saveAlerts(); } }
 export function clearLog() { log = []; saveAlerts(); }
 
+const GAP_MS = 3 * 60e3;
 const crossed = (prev, cur, level) => (prev < level && cur >= level) || (prev > level && cur <= level);
 const pctAway = (cur, level) => Math.abs(cur - level) / level * 100;
 
@@ -63,9 +64,17 @@ export function evaluate(asset, cur, fmt = String) {
     const n = { title, body, level, alertId: a.id, asset, price: cur, at: Date.now() };
     out.push(n); log.unshift(n);
   };
+  const now = Date.now();
   for (const a of alerts) {
     if (a.asset !== asset) continue;
     const prev = a.last ?? cur;
+    const watching = a.status === 'active' || a.status === 'waiting' || a.status === 'open';
+    // Trou de surveillance (app fermée, téléphone verrouillé, réseau coupé) : seul le dernier prix connu est comparé
+    // au prix actuel, un aller-retour sur le SL ou le TP pendant ce temps n'est pas visible.
+    if (watching && a.lastAt && now - a.lastAt > GAP_MS) {
+      const min = Math.round((now - a.lastAt) / 60e3);
+      push(a, `⏸️ ${asset} : surveillance interrompue ${min} min`, `Un niveau a pu être touché puis abandonné pendant ce temps. Vérifiez votre position chez votre broker.`, 'bad');
+    }
 
     if (a.kind === 'level' && a.status === 'active') {
       if (a.proximity && !a.nearSent && pctAway(cur, a.level) <= a.proximity && !crossed(prev, cur, a.level)) {
@@ -111,7 +120,7 @@ export function evaluate(asset, cur, fmt = String) {
         }
       }
     }
-    a.last = cur;
+    a.last = cur; a.lastAt = now;
   }
   if (out.length || alerts.some(a => a.asset === asset)) saveAlerts();
   return out;

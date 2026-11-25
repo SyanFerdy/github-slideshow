@@ -38,15 +38,17 @@ Aucune partie paiement ni abonnement : toutes les fonctionnalités sont accessib
 |---|---|---|
 | BTC | Kraken XBT/USD | non |
 | Or | Kraken PAXG/USD (jeton adossé à l’or, proche du spot), ou XAU/USD via Twelve Data | non |
-| EUR/USD, USD/JPY, USD/CAD | Coinbase (taux agrégés) | non |
-| S&P 500, Nasdaq, pétrole WTI, gaz naturel | Twelve Data (symboles modifiables) | oui, gratuite |
+| EUR/USD, USD/JPY, USD/CAD | Coinbase (taux agrégés ; mesuré : mis à jour environ toutes les 2 min, avec un retard possible de 2 à 3 pips sur le marché) | non |
+| S&P 500, Nasdaq, pétrole WTI, gaz naturel | Twelve Data (symboles par défaut `SPX`, `NDX`, `WTI/USD`, `NG/USD` **non vérifiés** faute de clé : modifiables, l’état de chaque actif s’affiche dans Flux de prix) | oui, gratuite |
 
 - Les prix sont relevés toutes les 20 s (toutes les 5 min pour Twelve Data). Un actif sans flux réel affiche sa valeur de démonstration en grisé avec la mention « démo ».
 - Les alertes ne se déclenchent **que sur une cotation réelle et fraîche**. Elles sont enregistrées sur l’appareil et survivent à un rechargement.
 - L’application **ne passe aucun ordre** : elle notifie, et vous agissez dans votre broker. Les prix du flux peuvent différer de ceux de votre broker (spread, horaires, instrument).
-- Sans serveur, la surveillance ne tourne que lorsque l’application est ouverte. Au retour dans l’app, tout niveau franchi entre-temps est détecté et notifié. Pour des alertes téléphone verrouillé, il faudrait ajouter un serveur avec Web Push.
+- Sans serveur, la surveillance ne tourne que lorsque l’application est ouverte. Au retour dans l’app, le dernier prix connu est comparé au prix actuel : un niveau dépassé est signalé, mais **un SL ou un TP touché puis abandonné pendant la coupure n’est pas visible**. Une alerte « surveillance interrompue » est alors émise. Pour une surveillance téléphone verrouillé, il faudrait un serveur avec Web Push.
+- Or : sans clé Twelve Data, le flux est PAXG/USD, qui peut s’écarter de quelques dollars du XAU/USD de votre broker. Un avertissement s’affiche à la création d’une alerte sur l’or.
+- iPhone : les notifications ne fonctionnent qu’après « Ajouter à l’écran d’accueil » (iOS 16.4 ou plus), en HTTPS.
 
-Les biais, squawks, indicateurs, calendrier et autres données de marché restent des **données de démonstration**. Le flux squawk est explicitement marqué « simulé ». Les fonctions IA produisent des lectures réelles quand une clé Claude est connectée.
+Les biais, squawks, indicateurs, calendrier et autres données de marché restent des **données de démonstration**. Le flux squawk est explicitement marqué « simulé ». Quand une clé Claude est connectée, l’IA reçoit les cotations réelles. Les données de démonstration lui sont signalées comme fictives, et elle s’appuie sur la recherche web pour l’actualité.
 
 ## Clé API Claude
 

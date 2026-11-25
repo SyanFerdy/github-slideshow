@@ -284,7 +284,9 @@ function marketContext() {
   const regimes = D.REGIMES.map(r => `${r.zone} ${r.label}`).join(', ');
   const px = D.ASSETS.map(a => FEED.isLive(a.id) ? `${a.id} ${fmtP(a.id, FEED.quotes[a.id].price)} (${FEED.status(a.id).text})` : `${a.id} : pas de cotation réelle`).join('\n');
   return `Date : ${new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}\n` +
-    `Cotations réelles :\n${px}\n\nBiais affichés dans l'app (source : ${state.biasMeta.source}) :\n${bias}\n\nDerniers squawks :\n${sq}\n\nRégimes macro : ${regimes}`;
+    `Cotations réelles (flux public, peut différer du broker) :\n${px}\n\nBiais affichés dans l'app (${state.biasMeta.source === 'claude' ? 'générés par Claude' : 'DONNÉES DE DÉMONSTRATION FICTIVES'}) :\n${bias}\n\n` +
+    `Derniers squawks (FLUX SIMULÉ, FICTIF : ne pas présenter comme des faits) :\n${sq}\n\nRégimes macro (démo, fictifs) : ${regimes}\n\n` +
+    `Important : seules les cotations ci-dessus sont réelles. Pour l'actualité, appuie-toi sur la recherche web si elle est disponible, sinon dis-le clairement.`;
 }
 
 /* =========================================================================
@@ -826,7 +828,7 @@ screen('support', 'Support', () => `
   <div class="section-title"><h2>FAQ</h2></div>
   ${[['Les lectures sont-elles des conseils en investissement ?', 'Non. Elles sont fournies à titre d’information. Vous gardez la décision.'],
      ['Les alertes SL / TP passent-elles mes ordres ?', 'Non. L’application vous prévient ; vous passez et ajustez vos ordres vous-même chez votre broker.'],
-     ['Pourquoi une alerte peut-elle différer de mon broker ?', 'Le flux (Kraken, Coinbase, Twelve Data) n’est pas celui de votre broker : spreads, heures de cotation et instruments (ex. PAXG pour l’or) diffèrent. Les prix sont relevés toutes les 20 s (5 min pour Twelve Data).'],
+     ['Pourquoi une alerte peut-elle différer de mon broker ?', 'Le flux (Kraken, Coinbase, Twelve Data) n’est pas celui de votre broker : spreads, heures de cotation et instruments (ex. PAXG pour l’or) diffèrent. Les prix sont relevés toutes les 20 s (5 min pour Twelve Data), mais Coinbase ne met à jour ses taux de change qu’environ toutes les 2 min : ne comptez pas sur l’app pour des niveaux à quelques pips près.'],
      ['Où est stockée ma clé API Claude ?', 'Uniquement sur cet appareil (stockage local). Elle n’est envoyée qu’à api.anthropic.com.'],
      ['Puis-je utiliser l’app avec Claude Code ?', 'Oui : voir Plus › Claude Code pour exporter le contexte de marché et utiliser la même clé.']]
     .map(([q, a]) => `<details class="card"><summary style="cursor:pointer;font-weight:600">${q}</summary><p class="small muted" style="margin:8px 0 0">${a}</p></details>`).join('')}`, { tab: 'more' });
@@ -979,13 +981,13 @@ const ACTIONS = {
   askAbout(el) { pendingQuestion = `Que penses-tu de ${el.dataset.id} en ce moment ? Donne-moi le verdict, la conviction, les drivers et les niveaux à surveiller.`; go('ai'); },
   assetAI(el) {
     const id = el.dataset.id, b = state.bias[id];
-    streamInto('assetAiBox', `Fais une analyse approfondie de ${id} (${assetName(id)}). Verdict actuel affiché : ${vLabel(b.v)} à ${b.conv}% de conviction.
+    streamInto('assetAiBox', `Fais une analyse approfondie de ${id} (${assetName(id)}). Verdict actuel affiché (${state.biasMeta.source === 'claude' ? 'généré précédemment par Claude' : 'donnée de démonstration fictive, à ne pas reprendre sans vérification'}) : ${vLabel(b.v)} à ${b.conv}% de conviction.${FEED.isLive(id) ? ` Cotation réelle : ${fmtP(id, FEED.quotes[id].price)}.` : ''}
 Drivers actuels : ${b.drivers.join(' ; ')}. Risque clé : ${b.risk}.
 Vérifie l'actualité récente si tu as accès à la recherche web. Structure : **Verdict**, puis les 4 angles (Macro, Fondamental, Géopolitique, Quantitatif), **Niveaux à surveiller**, **Risque clé**. 200 mots maximum.`, { useWeb: true });
   },
   driverAI(el) {
     const d = D.DRIVERS[+el.dataset.i];
-    streamInto('driverAiBox', `Approfondis le thème macro « ${d.topic} » (poids ${d.w}% dans les mouvements). Scénarios : ${d.scenarios.map(s => `${s.name} (${s.p}%, analogue ${s.analog})`).join(' ; ')}.
+    streamInto('driverAiBox', `Les poids et probabilités ci-dessous sont des données de démonstration fictives : vérifie l'actualité réelle avec la recherche web et signale tout écart. Approfondis le thème macro « ${d.topic} » (poids ${d.w}% dans les mouvements). Scénarios : ${d.scenarios.map(s => `${s.name} (${s.p}%, analogue ${s.analog})`).join(' ; ')}.
 Explique le mécanisme de transmission vers ${d.impacts.map(i => i[0]).join(', ')}, ce que disent les analogues historiques, et ce qui ferait basculer le scénario. 200 mots max.`, { useWeb: true });
   },
   recapAI() {
@@ -996,7 +998,7 @@ Explique le mécanisme de transmission vers ${d.impacts.map(i => i[0]).join(', '
     if (!AI.isConnected()) return promptConnect();
     sheet(`<div class="row" style="gap:6px;margin-bottom:6px"><span>${flag(s.cc)}</span><span class="sev sev-${s.sev}">${s.sev}</span><span class="small muted mono">${s.t}</span></div>
       <b>${esc(s.text)}</b><div style="margin-top:12px">${aiBox('sqAiBox', 'Impact selon Claude')}</div>`);
-    streamInto('sqAiBox', `Un squawk macro vient de tomber : « ${s.text} » (pays ${s.cc}, sévérité ${s.sev}). Actifs probablement concernés : ${s.assets.join(', ')}.
+    streamInto('sqAiBox', `Ce squawk provient d'un flux SIMULÉ de démonstration (événement fictif). Analyse-le comme un scénario hypothétique, en le précisant en une ligne au début : « ${s.text} » (pays ${s.cc}, sévérité ${s.sev}). Actifs probablement concernés : ${s.assets.join(', ')}.
 Pour chaque actif concerné : direction probable (haussier/baissier/neutre), intensité, et le mécanisme en une phrase. Termine par ce qui invaliderait cette lecture. 150 mots max.`);
   },
   async refreshBias(el) {
@@ -1057,6 +1059,8 @@ async function copyText(t) {
 
 function contextMarkdown() {
   return `# Contexte de marché — ${new Date().toLocaleString('fr-FR')}\n\n` +
+    `## Cotations réelles\n\n` + D.ASSETS.map(a => `- ${a.id} : ${FEED.isLive(a.id) ? fmtP(a.id, FEED.quotes[a.id].price) + ' (' + FEED.status(a.id).text + ')' : 'pas de cotation réelle'}`).join('\n') + '\n\n' +
+    `> ⚠️ Les sections suivantes (biais${state.biasMeta.source === 'claude' ? ' exceptés, générés par Claude' : ''}, squawks, régimes, pilote macro) sont des **données de démonstration fictives**.\n\n` +
     `Source des biais : ${state.biasMeta.source}${state.biasMeta.summary ? `\n\n> ${state.biasMeta.summary}` : ''}\n\n` +
     `## Biais directionnels\n\n| Actif | Verdict | Conviction | Driver principal | Risque clé |\n|---|---|---|---|---|\n` +
     D.ASSETS.map(a => { const b = state.bias[a.id]; return `| ${a.id} | ${vLabel(b.v)} | ${b.conv}% | ${b.drivers[0] || ''} | ${b.risk} |`; }).join('\n') +
@@ -1179,7 +1183,7 @@ screen('alerts', 'Alertes & trades', () => {
       ${perm === 'default' && window.isSecureContext ? '<button class="btn small primary" data-act="enableNotif">Activer</button>' : '<button class="btn small" data-act="testNotif">Tester</button>'}</div>
     ${perm === 'denied' ? '<div class="small v-bear" style="margin-top:8px">Autorisez les notifications pour ce site dans les réglages du navigateur.</div>' : ''}
     ${!window.isSecureContext ? '<div class="small v-neutral" style="margin-top:8px">Les notifications système nécessitent que l’app soit servie en HTTPS (ou localhost).</div>' : ''}
-    <div class="notice small" style="margin-top:10px">⚠️ Sans serveur, les alertes ne sont surveillées que lorsque l’application est ouverte (au premier plan ou récemment). Sur téléphone verrouillé, le navigateur suspend la surveillance : à la réouverture, tout niveau franchi entre-temps est détecté et notifié.</div>
+    <div class="notice small" style="margin-top:10px">⚠️ Sans serveur, les alertes ne sont surveillées que lorsque l’application est ouverte (au premier plan ou récemment). Sur téléphone verrouillé, le navigateur suspend la surveillance. À la réouverture, l’app compare le dernier prix connu au prix actuel : un niveau dépassé est signalé, mais un SL ou un TP touché puis abandonné entre-temps ne peut pas être vu. Une alerte « surveillance interrompue » vous le rappelle alors : vérifiez votre broker.</div>
   </div>
 
   <div class="section-title"><h2>Flux de prix</h2><button class="link" data-go="settings/feed">Sources</button></div>
@@ -1193,7 +1197,7 @@ screen('alerts', 'Alertes & trades', () => {
 
   <div class="section-title"><h2>Historique des notifications</h2>${AL.log.length ? '<button class="link" data-act="clearLog">Effacer</button>' : ''}</div>
   <div class="card" style="padding:4px 14px">${AL.log.slice(0, 50).map(n => `<div class="list-item" style="cursor:default"><div class="txt"><b>${esc(n.title)}</b><small>${esc(n.body)}<br>${new Date(n.at).toLocaleString('fr-FR')}</small></div></div>`).join('') || '<div class="empty small">Aucune notification pour l’instant.</div>'}</div>
-  <p class="disclaimer">Les cotations proviennent de flux publics (Kraken, Coinbase, Twelve Data) et peuvent différer de celles de votre broker (spread, horaires, instrument). Relevé toutes les 20 s (5 min pour Twelve Data) : un mouvement bref entre deux relevés peut ne pas être vu.</p>`;
+  <p class="disclaimer">Les cotations proviennent de flux publics (Kraken, Coinbase, Twelve Data) et peuvent différer de celles de votre broker (spread, horaires, instrument). Relevé toutes les 20 s (5 min pour Twelve Data) ; les taux de change Coinbase ne bougent qu’environ toutes les 2 min. Un mouvement bref entre deux relevés peut ne pas être vu.</p>`;
 }, { tab: 'more' });
 
 screen('feedcfg', 'Flux de prix', () => {
@@ -1223,6 +1227,11 @@ screen('feedcfg', 'Flux de prix', () => {
   },
 });
 
+const goldWarn = asset => `<div id="goldWarn">${goldWarnInner(asset)}</div>`;
+function goldWarnInner(asset) {
+  if (asset !== 'GOLD' || FEED.quotes.GOLD?.src !== 'kraken') return '';
+  return `<div class="notice small" style="margin-bottom:10px">⚠️ Or : le flux sans clé est PAXG/USD (jeton adossé à l’or), qui peut s’écarter de quelques dollars du XAU/USD de votre broker. Ajustez vos niveaux ou ajoutez une clé Twelve Data pour le XAU/USD.</div>`;
+}
 const num = v => { const n = parseFloat(String(v).replace(/\s/g, '').replace(',', '.')); return isFinite(n) ? n : null; };
 const assetOptions = sel => D.ASSETS.map(a => `<option value="${a.id}" ${a.id === sel ? 'selected' : ''}>${a.id} · ${esc(a.name)}</option>`).join('');
 
@@ -1231,11 +1240,12 @@ function levelSheet(asset = state.favorites[0] || 'GOLD') {
   sheet(`<h2 style="margin-top:0">Alerte de niveau</h2>
     <label class="field"><span>Actif</span><select class="input" id="aAsset">${assetOptions(asset)}</select></label>
     <div class="small muted" id="aCur" style="margin:-6px 0 10px">${cur ? 'Prix actuel : ' + fmtP(asset, cur) : 'Pas de cotation réelle pour le moment'}</div>
+    ${goldWarn(asset)}
     <label class="field"><span>Niveau de prix</span><input class="input mono" id="aLevel" inputmode="decimal" placeholder="ex. ${cur ? fmtP(asset, cur) : ''}"></label>
     <label class="field"><span>Prévenir aussi à l’approche (%, facultatif)</span><input class="input mono" id="aProx" inputmode="decimal" placeholder="ex. 0,2"></label>
     <label class="field"><span>Note</span><input class="input" id="aNote" placeholder="ex. résistance hebdo"></label>
     <button class="btn primary block" data-act="saveLevel">Créer l’alerte</button>`);
-  $('#aAsset').onchange = e => { const c = FEED.quotes[e.target.value]?.price; $('#aCur').textContent = c ? 'Prix actuel : ' + fmtP(e.target.value, c) : 'Pas de cotation réelle pour le moment'; };
+  $('#aAsset').onchange = e => { $('#goldWarn').innerHTML = goldWarnInner(e.target.value); const c = FEED.quotes[e.target.value]?.price; $('#aCur').textContent = c ? 'Prix actuel : ' + fmtP(e.target.value, c) : 'Pas de cotation réelle pour le moment'; };
 }
 
 function tradeSheet(asset = state.favorites[0] || 'GOLD', side = 'long', edit = null) {
@@ -1245,6 +1255,7 @@ function tradeSheet(asset = state.favorites[0] || 'GOLD', side = 'long', edit = 
     <p class="small muted" style="margin-top:-6px">Saisissez les niveaux de votre broker. Vous serez notifié à l’entrée, au SL, aux TP et à l’approche des niveaux.</p>
     <label class="field"><span>Actif</span><select class="input" id="tAsset" ${t ? 'disabled' : ''}>${assetOptions(asset)}</select></label>
     <div class="small muted" id="tCur" style="margin:-6px 0 10px">${cur ? 'Prix actuel : ' + fmtP(asset, cur) : 'Pas de cotation réelle pour le moment'}</div>
+    ${goldWarn(asset)}
     <div class="seg" style="margin-bottom:12px"><button type="button" class="${side === 'long' ? 'on' : ''}" data-act="tSide" data-s="long">Achat (long)</button><button type="button" class="${side === 'short' ? 'on' : ''}" data-act="tSide" data-s="short">Vente (short)</button></div>
     ${t ? '' : `<label class="check"><input type="checkbox" id="tOpen"> Je suis déjà en position (pas d’attente d’entrée)</label>`}
     <div class="grid-2"><label class="field"><span>Entrée</span><input class="input mono" id="tEntry" inputmode="decimal" value="${v(t?.entry)}" ${t?.status === 'open' ? 'disabled' : ''}></label>
@@ -1262,7 +1273,7 @@ function tradeSheet(asset = state.favorites[0] || 'GOLD', side = 'long', edit = 
     $('#tRR').textContent = e && sl && tp && e !== sl ? `Risque/rendement : ${fmt(Math.abs(tp - e) / Math.abs(e - sl), 2)} · risque ${fmt(Math.abs(e - sl) / e * 100, 2)} %` : '';
   };
   sh.querySelectorAll('input').forEach(i => i.addEventListener('input', upd)); upd();
-  $('#tAsset').onchange = e => { const c = FEED.quotes[e.target.value]?.price; $('#tCur').textContent = c ? 'Prix actuel : ' + fmtP(e.target.value, c) : 'Pas de cotation réelle pour le moment'; };
+  $('#tAsset').onchange = e => { $('#goldWarn').innerHTML = goldWarnInner(e.target.value); const c = FEED.quotes[e.target.value]?.price; $('#tCur').textContent = c ? 'Prix actuel : ' + fmtP(e.target.value, c) : 'Pas de cotation réelle pour le moment'; };
   $('#tOpen')?.addEventListener('change', e => { if (e.target.checked && !$('#tEntry').value) { const c = FEED.quotes[$('#tAsset').value]?.price; if (c) $('#tEntry').value = fmtP($('#tAsset').value, c).replace(/\s/g, ''); upd(); } });
 }
 

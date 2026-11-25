@@ -1,6 +1,6 @@
 // Flux de prix réels. Sources vérifiées depuis un navigateur (CORS autorisé) :
 //  - Kraken (sans clé)      : BTC (XBT/USD), Or via PAXG/USD (jeton adossé à l'or, proche du spot)
-//  - Coinbase (sans clé)    : EUR/USD, USD/JPY, USD/CAD (taux agrégés, rafraîchis ~1 min)
+//  - Coinbase (sans clé)    : EUR/USD, USD/JPY, USD/CAD (taux agrégés ; mesuré : mis à jour ~toutes les 2 min, retard possible de 2-3 pips)
 //  - Twelve Data (clé)      : S&P 500, Nasdaq 100, pétrole WTI, gaz naturel, et or spot XAU/USD
 // Un actif sans source disponible reste « hors flux » : aucune alerte ne peut s'y déclencher.
 
@@ -42,17 +42,20 @@ function dayOpen(id, price) {
 
 function set(id, price, open, src, note) {
   if (!isFinite(price) || price <= 0) return;
-  quotes[id] = { price, chg: open ? (price / open - 1) * 100 : 0, src, at: Date.now(), note };
+  const prev = quotes[id];
+  const changedAt = prev && prev.price === price && prev.src === src ? prev.changedAt : Date.now();
+  quotes[id] = { price, chg: open ? (price / open - 1) * 100 : 0, src, at: Date.now(), changedAt, note };
   delete errors[id];
 }
 
-async function pollKraken(useTdGold) {
+async function pollKraken() {
   const r = await fetch('https://api.kraken.com/0/public/Ticker?pair=XBTUSD,PAXGUSD');
   const j = await r.json();
   if (j.error?.length) throw new Error(j.error.join(', '));
   const t = j.result[KRAKEN.BTC]; if (t) set('BTC', +t.c[0], +t.o, 'kraken');
   const g = j.result[KRAKEN.GOLD];
-  if (g && !useTdGold) set('GOLD', +g.c[0], +g.o, 'kraken', 'PAXG/USD, proche de l’or spot');
+  // XAU/USD de Twelve Data, s'il est frais, est prioritaire sur PAXG.
+  if (g && !(quotes.GOLD?.src === 'twelvedata' && !isStale('GOLD'))) set('GOLD', +g.c[0], +g.o, 'kraken', 'PAXG/USD, proche de l’or spot');
 }
 
 async function pollCoinbase() {
@@ -67,11 +70,11 @@ async function pollTwelve(cfg) {
   const syms = ids.map(id => cfg.tdSymbols[id]);
   const r = await fetch(`https://api.twelvedata.com/quote?symbol=${encodeURIComponent(syms.join(','))}&apikey=${encodeURIComponent(cfg.tdKey)}`);
   const j = await r.json();
-  if (j.code && j.status === 'error') throw new Error(j.message);
+  if (j.code && j.status === 'error') throw new Error(String(j.message).slice(0, 90));
   const one = syms.length === 1;
   ids.forEach((id, i) => {
     const q = one ? j : j[syms[i]];
-    if (!q || q.status === 'error' || q.code) { errors[id] = `Twelve Data : ${q?.message || 'symbole indisponible'}`; return; }
+    if (!q || q.status === 'error' || q.code) { errors[id] = `Twelve Data : ${String(q?.message || 'symbole indisponible').slice(0, 90)}`; return; }
     set(id, +q.close, +q.previous_close || +q.open, 'twelvedata', q.is_market_open === false ? 'marché fermé' : '');
   });
 }
@@ -84,9 +87,7 @@ async function safe(fn, ids) {
 }
 
 export async function refreshFast() {
-  const cfg = getFeedConfig();
-  const tdGold = !!cfg.tdKey && quotes.GOLD?.src === 'twelvedata' && !isStale('GOLD');
-  await Promise.all([safe(() => pollKraken(tdGold), ['BTC', 'GOLD']), safe(pollCoinbase, Object.keys(COINBASE))]);
+  await Promise.all([safe(pollKraken, ['BTC', 'GOLD']), safe(pollCoinbase, Object.keys(COINBASE))]);
   emit();
 }
 export async function refreshTwelve() {
@@ -123,6 +124,7 @@ export function status(id) {
   }
   const age = Math.round((Date.now() - q.at) / 1000);
   const ageTxt = age < 60 ? `il y a ${age} s` : `il y a ${Math.round(age / 60)} min`;
-  return { live: !isStale(id), text: `${LABEL[q.src]}${q.note ? ' · ' + q.note : ''} · ${ageTxt}${isStale(id) ? ' · PÉRIMÉ' : ''}` };
+  const still = Math.round((Date.now() - q.changedAt) / 60e3);
+  return { live: !isStale(id), text: `${LABEL[q.src]}${q.note ? ' · ' + q.note : ''} · ${ageTxt}${still >= 3 ? ` · inchangé depuis ${still} min` : ''}${isStale(id) ? ' · PÉRIMÉ' : ''}` };
 }
 export const SOURCES_INFO = DEFAULT_TD_SYMBOLS;
