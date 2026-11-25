@@ -1,6 +1,6 @@
 // Flux de prix réels. Sources vérifiées depuis un navigateur (CORS autorisé) :
 //  - Kraken (sans clé)      : BTC (XBT/USD), Or via PAXG/USD (jeton adossé à l'or, proche du spot)
-//  - Coinbase (sans clé)    : EUR/USD, USD/JPY, USD/CAD (taux agrégés ; mesuré : mis à jour ~toutes les 2 min, retard possible de 2-3 pips)
+//  - Coinbase (sans clé)    : EUR/USD, USD/JPY, USD/CAD (taux agrégés ; mesuré : mis à jour toutes les 2-3 min ou plus, retard possible de 2-3 pips)
 //  - Twelve Data (clé)      : S&P 500, Nasdaq 100, pétrole WTI, gaz naturel, et or spot XAU/USD
 // Un actif sans source disponible reste « hors flux » : aucune alerte ne peut s'y déclencher.
 

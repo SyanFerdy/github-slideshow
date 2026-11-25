@@ -38,7 +38,7 @@ Aucune partie paiement ni abonnement : toutes les fonctionnalités sont accessib
 |---|---|---|
 | BTC | Kraken XBT/USD | non |
 | Or | Kraken PAXG/USD (jeton adossé à l’or, proche du spot), ou XAU/USD via Twelve Data | non |
-| EUR/USD, USD/JPY, USD/CAD | Coinbase (taux agrégés ; mesuré : mis à jour environ toutes les 2 min, avec un retard possible de 2 à 3 pips sur le marché) | non |
+| EUR/USD, USD/JPY, USD/CAD | Coinbase (taux agrégés ; mesuré : mis à jour seulement toutes les 2 à 3 min ou plus, avec un retard possible de 2 à 3 pips sur le marché) | non |
 | S&P 500, Nasdaq, pétrole WTI, gaz naturel | Twelve Data (symboles par défaut `SPX`, `NDX`, `WTI/USD`, `NG/USD` **non vérifiés** faute de clé : modifiables, l’état de chaque actif s’affiche dans Flux de prix) | oui, gratuite |
 
 - Les prix sont relevés toutes les 20 s (toutes les 5 min pour Twelve Data). Un actif sans flux réel affiche sa valeur de démonstration en grisé avec la mention « démo ».

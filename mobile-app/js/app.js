@@ -828,7 +828,7 @@ screen('support', 'Support', () => `
   <div class="section-title"><h2>FAQ</h2></div>
   ${[['Les lectures sont-elles des conseils en investissement ?', 'Non. Elles sont fournies à titre d’information. Vous gardez la décision.'],
      ['Les alertes SL / TP passent-elles mes ordres ?', 'Non. L’application vous prévient ; vous passez et ajustez vos ordres vous-même chez votre broker.'],
-     ['Pourquoi une alerte peut-elle différer de mon broker ?', 'Le flux (Kraken, Coinbase, Twelve Data) n’est pas celui de votre broker : spreads, heures de cotation et instruments (ex. PAXG pour l’or) diffèrent. Les prix sont relevés toutes les 20 s (5 min pour Twelve Data), mais Coinbase ne met à jour ses taux de change qu’environ toutes les 2 min : ne comptez pas sur l’app pour des niveaux à quelques pips près.'],
+     ['Pourquoi une alerte peut-elle différer de mon broker ?', 'Le flux (Kraken, Coinbase, Twelve Data) n’est pas celui de votre broker : spreads, heures de cotation et instruments (ex. PAXG pour l’or) diffèrent. Les prix sont relevés toutes les 20 s (5 min pour Twelve Data), mais Coinbase ne met à jour ses taux de change que toutes les 2 à 3 min ou plus : ne comptez pas sur l’app pour des niveaux à quelques pips près.'],
      ['Où est stockée ma clé API Claude ?', 'Uniquement sur cet appareil (stockage local). Elle n’est envoyée qu’à api.anthropic.com.'],
      ['Puis-je utiliser l’app avec Claude Code ?', 'Oui : voir Plus › Claude Code pour exporter le contexte de marché et utiliser la même clé.']]
     .map(([q, a]) => `<details class="card"><summary style="cursor:pointer;font-weight:600">${q}</summary><p class="small muted" style="margin:8px 0 0">${a}</p></details>`).join('')}`, { tab: 'more' });
@@ -1197,7 +1197,7 @@ screen('alerts', 'Alertes & trades', () => {
 
   <div class="section-title"><h2>Historique des notifications</h2>${AL.log.length ? '<button class="link" data-act="clearLog">Effacer</button>' : ''}</div>
   <div class="card" style="padding:4px 14px">${AL.log.slice(0, 50).map(n => `<div class="list-item" style="cursor:default"><div class="txt"><b>${esc(n.title)}</b><small>${esc(n.body)}<br>${new Date(n.at).toLocaleString('fr-FR')}</small></div></div>`).join('') || '<div class="empty small">Aucune notification pour l’instant.</div>'}</div>
-  <p class="disclaimer">Les cotations proviennent de flux publics (Kraken, Coinbase, Twelve Data) et peuvent différer de celles de votre broker (spread, horaires, instrument). Relevé toutes les 20 s (5 min pour Twelve Data) ; les taux de change Coinbase ne bougent qu’environ toutes les 2 min. Un mouvement bref entre deux relevés peut ne pas être vu.</p>`;
+  <p class="disclaimer">Les cotations proviennent de flux publics (Kraken, Coinbase, Twelve Data) et peuvent différer de celles de votre broker (spread, horaires, instrument). Relevé toutes les 20 s (5 min pour Twelve Data) ; les taux de change Coinbase ne bougent que toutes les 2 à 3 min ou plus. Un mouvement bref entre deux relevés peut ne pas être vu.</p>`;
 }, { tab: 'more' });
 
 screen('feedcfg', 'Flux de prix', () => {
