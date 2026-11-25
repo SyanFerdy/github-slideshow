@@ -1,5 +1,5 @@
 // Service worker : met en cache l'interface pour un usage hors ligne (les appels à l'API Claude ne sont jamais mis en cache).
-const CACHE = 'polar-macro-v4';
+const CACHE = 'polar-macro-v5';
 const ASSETS = ['./', './index.html', './css/app.css', './js/app.js', './js/data.js', './js/claude.js', './js/feed.js', './js/alerts.js', './icon.svg', './manifest.webmanifest'];
 
 self.addEventListener('install', e => {

@@ -37,11 +37,17 @@ Aucune partie paiement ni abonnement : toutes les fonctionnalités sont accessib
 | Actif | Source | Clé |
 |---|---|---|
 | BTC | Kraken XBT/USD | non |
-| Or | Kraken PAXG/USD (jeton adossé à l’or, proche du spot), ou XAU/USD via Twelve Data | non |
-| EUR/USD, USD/JPY, USD/CAD | Coinbase (taux agrégés ; mesuré : mis à jour seulement toutes les 2 à 3 min ou plus, avec un retard possible de 2 à 3 pips sur le marché) | non |
+| Or | Twelve Data XAU/USD si une clé est configurée, sinon Kraken PAXG/USD (jeton adossé à l’or, proche du spot) | facultative |
+| EUR/USD, USD/JPY, USD/CAD | Twelve Data si une clé est configurée, sinon Coinbase (taux agrégés ; mesuré : mis à jour seulement toutes les 2 à 3 min, retard possible de 2 à 3 pips) | facultative |
 | S&P 500, Nasdaq, pétrole WTI, gaz naturel | Twelve Data (symboles par défaut `SPX`, `NDX`, `WTI/USD`, `NG/USD` **non vérifiés** faute de clé : modifiables, l’état de chaque actif s’affiche dans Flux de prix) | oui, gratuite |
 
-- Les prix sont relevés toutes les 20 s (toutes les 5 min pour Twelve Data). Un actif sans flux réel affiche sa valeur de démonstration en grisé avec la mention « démo ».
+- Kraken et Coinbase sont relevés toutes les 20 s. Twelve Data est prioritaire tant que sa cotation est fraîche ; sinon (panne, quota épuisé), l’app repasse automatiquement sur Kraken/Coinbase.
+- **Budget Twelve Data** (offre gratuite : 800 crédits/jour, 8/min, 1 crédit par symbole relevé). Réglages dans *Flux de prix* :
+  - fréquence : 1, 2 (par défaut), 5 ou 10 min ;
+  - *mode économe* (par défaut) : seuls les actifs ayant une alerte active sont relevés à cette fréquence, les autres toutes les 15 min pour l’affichage ;
+  - l’écran affiche les crédits consommés et une estimation des heures de surveillance couvertes par jour. Les relevés s’arrêtent quand l’app est en arrière-plan.
+  - Exemple : 1 paire de devises sous alerte, relevé toutes les 2 min, mode économe : 30 + 32 crédits/h ≈ 12,5 h de surveillance par jour.
+- Un actif sans flux réel affiche sa valeur de démonstration en grisé avec la mention « démo ».
 - Les alertes ne se déclenchent **que sur une cotation réelle et fraîche**. Elles sont enregistrées sur l’appareil et survivent à un rechargement.
 - L’application **ne passe aucun ordre** : elle notifie, et vous agissez dans votre broker. Les prix du flux peuvent différer de ceux de votre broker (spread, horaires, instrument).
 - Sans serveur, la surveillance ne tourne que lorsque l’application est ouverte. Au retour dans l’app, le dernier prix connu est comparé au prix actuel : un niveau dépassé est signalé, mais **un SL ou un TP touché puis abandonné pendant la coupure n’est pas visible**. Une alerte « surveillance interrompue » est alors émise. Pour une surveillance téléphone verrouillé, il faudrait un serveur avec Web Push.

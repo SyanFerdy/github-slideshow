@@ -828,7 +828,7 @@ screen('support', 'Support', () => `
   <div class="section-title"><h2>FAQ</h2></div>
   ${[['Les lectures sont-elles des conseils en investissement ?', 'Non. Elles sont fournies à titre d’information. Vous gardez la décision.'],
      ['Les alertes SL / TP passent-elles mes ordres ?', 'Non. L’application vous prévient ; vous passez et ajustez vos ordres vous-même chez votre broker.'],
-     ['Pourquoi une alerte peut-elle différer de mon broker ?', 'Le flux (Kraken, Coinbase, Twelve Data) n’est pas celui de votre broker : spreads, heures de cotation et instruments (ex. PAXG pour l’or) diffèrent. Les prix sont relevés toutes les 20 s (5 min pour Twelve Data), mais Coinbase ne met à jour ses taux de change que toutes les 2 à 3 min ou plus : ne comptez pas sur l’app pour des niveaux à quelques pips près.'],
+     ['Pourquoi une alerte peut-elle différer de mon broker ?', 'Le flux (Kraken, Coinbase, Twelve Data) n’est pas celui de votre broker : spreads, heures de cotation et instruments (ex. PAXG pour l’or) diffèrent. Kraken et Coinbase sont relevés toutes les 20 s, mais Coinbase ne met à jour ses taux de change que toutes les 2 à 3 min. Avec une clé Twelve Data, les devises et l’or passent par Twelve Data, relevé toutes les 1 à 10 min selon votre réglage. Ne comptez pas sur l’app pour des niveaux à quelques pips près.'],
      ['Où est stockée ma clé API Claude ?', 'Uniquement sur cet appareil (stockage local). Elle n’est envoyée qu’à api.anthropic.com.'],
      ['Puis-je utiliser l’app avec Claude Code ?', 'Oui : voir Plus › Claude Code pour exporter le contexte de marché et utiliser la même clé.']]
     .map(([q, a]) => `<details class="card"><summary style="cursor:pointer;font-weight:600">${q}</summary><p class="small muted" style="margin:8px 0 0">${a}</p></details>`).join('')}`, { tab: 'more' });
@@ -1197,21 +1197,31 @@ screen('alerts', 'Alertes & trades', () => {
 
   <div class="section-title"><h2>Historique des notifications</h2>${AL.log.length ? '<button class="link" data-act="clearLog">Effacer</button>' : ''}</div>
   <div class="card" style="padding:4px 14px">${AL.log.slice(0, 50).map(n => `<div class="list-item" style="cursor:default"><div class="txt"><b>${esc(n.title)}</b><small>${esc(n.body)}<br>${new Date(n.at).toLocaleString('fr-FR')}</small></div></div>`).join('') || '<div class="empty small">Aucune notification pour l’instant.</div>'}</div>
-  <p class="disclaimer">Les cotations proviennent de flux publics (Kraken, Coinbase, Twelve Data) et peuvent différer de celles de votre broker (spread, horaires, instrument). Relevé toutes les 20 s (5 min pour Twelve Data) ; les taux de change Coinbase ne bougent que toutes les 2 à 3 min ou plus. Un mouvement bref entre deux relevés peut ne pas être vu.</p>`;
+  <p class="disclaimer">Les cotations proviennent de flux publics (Kraken, Coinbase, Twelve Data) et peuvent différer de celles de votre broker (spread, horaires, instrument). Kraken et Coinbase sont relevés toutes les 20 s (les taux Coinbase ne bougent que toutes les 2 à 3 min) ; Twelve Data selon la fréquence choisie dans Flux de prix. Un mouvement bref entre deux relevés peut ne pas être vu.</p>`;
 }, { tab: 'more' });
+
+const alertedAssets = () => [...new Set(AL.alerts.filter(a => ['active', 'waiting', 'open'].includes(a.status)).map(a => a.asset))];
 
 screen('feedcfg', 'Flux de prix', () => {
   const cfg = FEED.getFeedConfig();
+  const hours = FEED.coverageHours(cfg, alertedAssets().filter(id => cfg.tdSymbols[id]).length);
+  const hTxt = hours >= 24 ? '24 h/24' : `≈ ${fmt(hours, 1)} h par jour`;
   return `
   <div class="card"><h3>Sources sans clé</h3>
     <div class="feat">BTC : Kraken (XBT/USD)</div>
-    <div class="feat">Or : Kraken PAXG/USD (jeton adossé à l’or, proche du spot XAU), remplacé par XAU/USD si Twelve Data est connecté</div>
-    <div class="feat">EUR/USD, USD/JPY, USD/CAD : Coinbase (taux agrégés)</div></div>
+    <div class="feat">Or : Kraken PAXG/USD (jeton adossé à l’or, proche du spot XAU)</div>
+    <div class="feat">EUR/USD, USD/JPY, USD/CAD : Coinbase (taux agrégés, mis à jour toutes les 2 à 3 min seulement)</div>
+    <p class="small muted" style="margin-bottom:0">Avec une clé Twelve Data, l’or (XAU/USD) et les devises passent par Twelve Data, plus précis. Les sources gratuites restent en secours si Twelve Data ne répond pas ou si le quota du jour est épuisé.</p></div>
 
-  <div class="card"><h3>Twelve Data (optionnel)</h3>
-    <p class="small muted" style="margin-top:0">Nécessaire pour le S&amp;P 500, le Nasdaq, le pétrole et le gaz naturel. Clé gratuite sur <a href="https://twelvedata.com/" target="_blank" rel="noopener">twelvedata.com</a> (800 requêtes/jour : relevé toutes les 5 min). L’offre gratuite ne couvre pas forcément les indices : le statut de chaque actif s’affiche ci-dessous.</p>
+  <div class="card"><h3>Twelve Data</h3>
+    <p class="small muted" style="margin-top:0">Indispensable pour le S&amp;P 500, le Nasdaq, le pétrole et le gaz, et recommandé pour les devises et l’or. Clé gratuite sur <a href="https://twelvedata.com/" target="_blank" rel="noopener">twelvedata.com</a>. L’offre gratuite donne 800 crédits par jour et 8 par minute, à raison d’1 crédit par symbole relevé.</p>
     <label class="field"><span>Clé API Twelve Data</span><input class="input mono" id="tdKey" type="password" value="${esc(cfg.tdKey)}" autocomplete="off" spellcheck="false"></label>
-    ${Object.entries(cfg.tdSymbols).map(([id, sym]) => `<label class="field"><span>Symbole pour ${id}</span><input class="input mono" data-sym="${id}" value="${esc(sym)}"></label>`).join('')}
+    <label class="field"><span>Fréquence de relevé</span><select class="input" id="tdInterval">${[1, 2, 5, 10].map(m => `<option value="${m}" ${cfg.tdInterval === m ? 'selected' : ''}>Toutes les ${m} min</option>`).join('')}</select></label>
+    <div class="row between" style="margin-bottom:12px"><div><b class="small">Mode économe</b><div class="small muted">À cette fréquence, seuls les actifs ayant une alerte active sont relevés ; les autres le sont toutes les 15 min</div></div>
+      <label class="switch"><input type="checkbox" id="tdOnlyAlerts" ${cfg.tdOnlyAlerts ? 'checked' : ''}><span></span></label></div>
+    <div class="notice small" style="margin-bottom:12px">Avec ces réglages et vos ${alertedAssets().length} actif(s) sous alerte, le quota couvre <b>${hTxt}</b>. Crédits utilisés aujourd’hui : <b>${FEED.creditsUsedToday()}</b> / ${cfg.tdDaily}. Les relevés sont suspendus quand l’app est en arrière-plan.</div>
+    <details style="margin-bottom:12px"><summary class="small" style="cursor:pointer">Symboles utilisés (laisser vide pour ne pas utiliser Twelve Data sur un actif)</summary>
+    ${Object.entries(cfg.tdSymbols).map(([id, sym]) => `<label class="field" style="margin-top:8px"><span>${id}</span><input class="input mono" data-sym="${id}" value="${esc(sym)}"></label>`).join('')}</details>
     <div class="grid-2"><button class="btn primary" data-act="saveFeed">Enregistrer</button>${cfg.tdKey ? '<button class="btn danger" data-act="removeFeedKey">Retirer la clé</button>' : ''}</div></div>
 
   <div class="section-title"><h2>État</h2></div>
@@ -1221,7 +1231,8 @@ screen('feedcfg', 'Flux de prix', () => {
   mount() {
     ACTIONS.saveFeed = () => {
       const tdSymbols = {}; document.querySelectorAll('[data-sym]').forEach(i => { tdSymbols[i.dataset.sym] = i.value.trim(); });
-      FEED.saveFeedConfig({ tdKey: $('#tdKey').value.trim(), tdSymbols }); FEED.restartTwelve(); toast('Flux enregistré, connexion en cours…'); render();
+      FEED.saveFeedConfig({ tdKey: $('#tdKey').value.trim(), tdSymbols, tdInterval: +$('#tdInterval').value, tdOnlyAlerts: $('#tdOnlyAlerts').checked });
+      FEED.restartTwelve(); toast('Flux enregistré, connexion en cours…'); render();
     };
     ACTIONS.removeFeedKey = () => { FEED.saveFeedConfig({ tdKey: '' }); FEED.restartTwelve(); toast('Clé retirée.'); render(); };
   },
@@ -1289,7 +1300,7 @@ Object.assign(ACTIONS, {
     if (!cur) return toast('Impossible : aucune cotation réelle pour cet actif (le sens de franchissement ne peut pas être déterminé).');
     if (level === cur) return toast('Le niveau est égal au prix actuel.');
     AL.addLevel({ asset, level, price: cur, note: $('#aNote').value.trim(), proximity: prox });
-    closeSheet(); toast(`Alerte créée : ${asset} ${level > cur ? '▲' : '▼'} ${fmtP(asset, level)}`); render();
+    FEED.refreshTwelve('prio'); closeSheet(); toast(`Alerte créée : ${asset} ${level > cur ? '▲' : '▼'} ${fmtP(asset, level)}`); render();
   },
   saveTrade(el) {
     const side = document.querySelector('.sheet').dataset.side;
@@ -1309,7 +1320,7 @@ Object.assign(ACTIONS, {
       if (long ? cur <= lv.sl || cur >= lv.tp1 : cur >= lv.sl || cur <= lv.tp1) return toast('Le prix actuel est déjà au-delà du SL ou du TP1.');
     }
     AL.addTrade({ asset, ...lv, price: cur, open, ...extra });
-    closeSheet(); toast(`Trade ${asset} suivi.`); render();
+    FEED.refreshTwelve('prio'); closeSheet(); toast(`Trade ${asset} suivi.`); render();
   },
   cancelAlert(el) { AL.cancel(el.dataset.id); render(); },
   removeAlert(el) { AL.remove(el.dataset.id); render(); },
@@ -1326,6 +1337,7 @@ Object.assign(ACTIONS, {
    ========================================================================= */
 render();
 FEED.onQuotes(onQuotes);
+FEED.setPriority(alertedAssets);
 FEED.start();
 setInterval(pushSquawk, 25000);
 setInterval(() => document.querySelectorAll('[data-status]').forEach(el => { el.innerHTML = feedLine(el.dataset.status); }), 5000);
