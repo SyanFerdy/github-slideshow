@@ -4,30 +4,49 @@ Application mobile (PWA installable) de terminal d’intelligence macro. Son int
 
 ## Lancer l’application
 
-Aucune compilation n’est nécessaire. Il suffit de servir le dossier en HTTP :
+Aucune compilation n’est nécessaire.
+
+**Sur ordinateur (test)** :
 
 ```bash
 cd mobile-app
 python3 -m http.server 8080
-# puis ouvrir http://localhost:8080 sur le téléphone ou le navigateur
+# ouvrir http://localhost:8080
 ```
 
-Sur mobile, utilisez « Ajouter à l’écran d’accueil » pour l’installer comme une application. Elle s’ouvre alors en plein écran et l’interface reste disponible hors ligne.
+**Sur téléphone, l’application doit être servie en HTTPS** : les notifications, le service worker et l’installation ne fonctionnent pas sur une adresse `http://192.168…` du réseau local. Le plus simple est d’activer GitHub Pages sur ce dépôt (Settings › Pages, branche choisie, dossier racine), puis d’ouvrir `https://<utilisateur>.github.io/github-slideshow/mobile-app/`.
+
+Sur le téléphone, utilisez ensuite « Ajouter à l’écran d’accueil » pour l’installer comme une application. Elle s’ouvre alors en plein écran et l’interface reste disponible hors ligne.
 
 ## Fonctionnalités
 
 | Domaine | Écrans |
 |---|---|
-| Compte | Présentation, inscription (e-mail, mot de passe, pays, code parrain, opt-in), connexion par mot de passe ou Magic Link, mot de passe oublié, mode démo |
-| Lire le marché | Tableau de bord, biais directionnel des 9 actifs (verdict, conviction, 4 angles, drivers, risque clé), pilote macro avec scénarios, régime de marché, récaps, flux squawk en direct, carte macro et fiches pays |
+| Compte | Présentation, inscription (e-mail, mot de passe, pays, opt-in), connexion par mot de passe ou Magic Link, mot de passe oublié, mode démo |
+| Lire le marché | Tableau de bord, biais directionnel des 9 actifs (verdict, conviction, 4 angles, drivers, risque clé), pilote macro avec scénarios, régime de marché, récaps, flux squawk (simulé), carte macro et fiches pays |
 | Données | Calendrier économique, indicateurs, vue d’ensemble par classe, corrélations, force des devises, COT, taux et anticipations, obligations, saisonnalité |
 | Recherche | Recherche bancaire, marchés prédictifs |
-| Agir | Opportunités (Pro), support et FAQ, favoris |
-| Offres | Basic, Pro, Enterprise, bascule mensuel/annuel, tableau comparatif |
+| Agir | **Alertes & trades** (niveau atteint, entrée, SL, TP1/TP2, approche d’un niveau, SL au point d’entrée après le TP1), idées de setups (exemples), support et FAQ, favoris |
 | IA (clé API) | Chat en streaming, actualisation des 9 biais avec recherche web, analyse approfondie d’un actif, impact d’un squawk, récap et pilote macro générés |
 | Claude Code | Commande d’export de la clé, contexte de marché à copier en Markdown ou à télécharger en JSON |
 
-Les données de marché sont des **données de démonstration**. Seules les fonctions IA produisent des lectures réelles, et seulement quand une clé est connectée.
+Aucune partie paiement ni abonnement : toutes les fonctionnalités sont accessibles.
+
+## Prix réels et alertes
+
+| Actif | Source | Clé |
+|---|---|---|
+| BTC | Kraken XBT/USD | non |
+| Or | Kraken PAXG/USD (jeton adossé à l’or, proche du spot), ou XAU/USD via Twelve Data | non |
+| EUR/USD, USD/JPY, USD/CAD | Coinbase (taux agrégés) | non |
+| S&P 500, Nasdaq, pétrole WTI, gaz naturel | Twelve Data (symboles modifiables) | oui, gratuite |
+
+- Les prix sont relevés toutes les 20 s (toutes les 5 min pour Twelve Data). Un actif sans flux réel affiche sa valeur de démonstration en grisé avec la mention « démo ».
+- Les alertes ne se déclenchent **que sur une cotation réelle et fraîche**. Elles sont enregistrées sur l’appareil et survivent à un rechargement.
+- L’application **ne passe aucun ordre** : elle notifie, et vous agissez dans votre broker. Les prix du flux peuvent différer de ceux de votre broker (spread, horaires, instrument).
+- Sans serveur, la surveillance ne tourne que lorsque l’application est ouverte. Au retour dans l’app, tout niveau franchi entre-temps est détecté et notifié. Pour des alertes téléphone verrouillé, il faudrait ajouter un serveur avec Web Push.
+
+Les biais, squawks, indicateurs, calendrier et autres données de marché restent des **données de démonstration**. Le flux squawk est explicitement marqué « simulé ». Les fonctions IA produisent des lectures réelles quand une clé Claude est connectée.
 
 ## Clé API Claude
 
@@ -56,5 +75,7 @@ mobile-app/
 └── js/
     ├── app.js            Routeur, écrans, actions
     ├── data.js           Données de démonstration et nom de marque
+    ├── feed.js           Flux de prix réels (Kraken, Coinbase, Twelve Data)
+    ├── alerts.js         Moteur d’alertes niveau / entrée / SL / TP
     └── claude.js         Connexion à l’API Claude
 ```

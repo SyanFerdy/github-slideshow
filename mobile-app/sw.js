@@ -1,6 +1,6 @@
 // Service worker : met en cache l'interface pour un usage hors ligne (les appels à l'API Claude ne sont jamais mis en cache).
-const CACHE = 'polar-macro-v1';
-const ASSETS = ['./', './index.html', './css/app.css', './js/app.js', './js/data.js', './js/claude.js', './icon.svg', './manifest.webmanifest'];
+const CACHE = 'polar-macro-v2';
+const ASSETS = ['./', './index.html', './css/app.css', './js/app.js', './js/data.js', './js/claude.js', './js/feed.js', './js/alerts.js', './icon.svg', './manifest.webmanifest'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
@@ -18,4 +18,14 @@ self.addEventListener('fetch', e => {
       return res;
     }).catch(() => caches.match(e.request))
   );
+});
+
+// Clic sur une notification d'alerte : ramener l'application au premier plan sur l'écran Alertes.
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const go = e.notification.data?.go || 'alerts';
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    for (const c of list) { c.postMessage({ go }); return c.focus(); }
+    return self.clients.openWindow('./index.html#/' + go);
+  }));
 });

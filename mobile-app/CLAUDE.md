@@ -8,6 +8,7 @@ Cette PWA mobile n’utilise ni framework ni étape de build. Pour tester : `pyt
 - L’état vit dans l’objet `state` et `save()` le persiste dans `localStorage` sous le préfixe `pm.`.
 - `js/data.js` contient toutes les données de démo et la constante `BRAND`. Pour ajouter un actif : l’ajouter dans `ASSETS` **et** `BIAS`.
 - `js/claude.js` contient tous les appels à l’API Claude (SDK `@anthropic-ai/sdk` chargé depuis jsDelivr, version figée) : `streamChat`, `ask`, `testConnection`, `extractJson`. Le modèle par défaut est `claude-opus-5-5`, et l’effort comme la recherche web se règlent dans l’écran Clé API.
+- `js/feed.js` récupère les cotations réelles et `js/alerts.js` contient le moteur d’alertes, en logique pure testable sous Node avec un `localStorage` simulé. Les alertes ne s’évaluent que si `FEED.isLive(id)` : ne jamais les brancher sur des données de démo.
 - La vue Plus (`FEATURES` dans app.js) liste toutes les fonctionnalités. Il faut l’enrichir à chaque nouvel écran.
 
 ## Conventions

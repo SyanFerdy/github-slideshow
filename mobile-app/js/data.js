@@ -232,15 +232,6 @@ export const CORR = [
   [0.58, 0.09, 0.17, 0.12, 0.22, 1],
 ];
 
-export const PLANS = [
-  { id: 'basic', name: 'Basic', tag: 'Votre lecture quotidienne du marché', monthly: 29, yearly: 290,
-    features: ['Dashboard et suivi des actifs', 'Briefing IA quotidien', 'Pilote macro et scénarios', 'Récaps session et hebdo', 'Flux d’événements', 'Calendrier économique', 'Carte géopolitique', 'Indicateurs macro', 'Force des devises', 'Obligations souveraines', 'Marchés prédictifs', 'Positionnement COT', 'Matrice de corrélation', 'Régime de marché', 'Recherche bancaire', 'Taux et anticipations', 'Saisonnalité', 'Support par chat'] },
-  { id: 'pro', name: 'Pro', tag: 'Tout Basic, plus l’analyse directionnelle', monthly: 59, yearly: 590, recommended: true,
-    features: ['Tout le plan Basic', 'Opportunités directionnelles', 'Canal Telegram privé', 'Niveaux stop et objectif (Bêta)', 'Performance publiée telle quelle (Bêta)', 'Analyse technique (bientôt)'] },
-  { id: 'enterprise', name: 'Enterprise', tag: 'Pour les équipes et les fonds', custom: true,
-    features: ['Tout le plan Pro', 'Modèles quantitatifs propriétaires', 'Accès multi-utilisateurs', 'Intégrations sur mesure', 'Support dédié'] },
-];
-
 export const COMPARISON = [
   ['Temps de réaction', '> 30 minutes', '< 1 seconde'],
   ['Couverture macro', 'Partielle, manuelle', '24/7, automatisée'],

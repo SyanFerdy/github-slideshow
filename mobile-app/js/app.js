@@ -1,5 +1,7 @@
 import * as D from './data.js';
 import * as AI from './claude.js';
+import * as FEED from './feed.js';
+import * as AL from './alerts.js';
 
 /* =========================================================================
    État et persistance
@@ -15,12 +17,12 @@ const state = {
   accounts: store.get('accounts', {}),
   bias: store.get('bias', structuredClone(D.BIAS)),
   biasMeta: store.get('biasMeta', { source: 'démo', at: null, summary: '' }),
-  prices: Object.fromEntries(D.ASSETS.map(a => [a.id, { price: a.price, chg: a.chg }])),
+  history: {}, // ticks réels reçus pendant la session, pour le mini-graphique
   squawk: D.SQUAWK_SEED.map((s, i) => ({ ...s, id: 'seed' + i })),
   squawkFilter: 'ALL',
   unread: 0,
   chat: store.get('chat', []),
-  prefs: store.get('prefs', { theme: 'dark', notif: true, live: true, billing: 'monthly', lang: 'fr' }),
+  prefs: store.get('prefs', { theme: 'dark', notif: true, live: true, sound: true, lang: 'fr' }),
   favorites: store.get('favorites', ['SP500', 'GOLD', 'EURUSD']),
   marketsTab: 'Tous',
   homeTab: 'events',
@@ -44,6 +46,14 @@ const vArrow = v => v > 0 ? '▲' : v < 0 ? '▼' : '◆';
 const pill = (v, extra = '') => `<span class="pill bg-${vKey(v)}">${vArrow(v)} ${vLabel(v)}${extra}</span>`;
 const fmt = (n, d) => n.toLocaleString('fr-FR', { minimumFractionDigits: d, maximumFractionDigits: d });
 const decimals = id => ({ EURUSD: 4, USDCAD: 4, NATGAS: 3, USDJPY: 2, OIL: 2, BTC: 0 }[id] ?? 1);
+/** Prix affiché : cotation réelle si disponible, sinon valeur de démonstration (jamais utilisée pour les alertes). */
+function priceOf(id) {
+  const q = FEED.quotes[id];
+  if (q) return { price: q.price, chg: q.chg, live: FEED.isLive(id) };
+  const a = D.ASSETS.find(x => x.id === id);
+  return { price: a.price, chg: a.chg, live: false, demo: true };
+}
+const fmtP = (id, v) => fmt(v, decimals(id));
 const assetName = id => D.ASSETS.find(a => a.id === id)?.name || id;
 const nowHM = () => new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
 const flag = cc => ({ US: '🇺🇸', EU: '🇪🇺', JP: '🇯🇵', CN: '🇨🇳', UK: '🇬🇧', CA: '🇨🇦', AU: '🇦🇺', EM: '🌍', IR: '🇮🇷', SA: '🇸🇦', RU: '🇷🇺', DE: '🇩🇪' }[cc] || '🏳️');
@@ -81,6 +91,7 @@ function sheet(html) {
 function closeSheet() { document.querySelectorAll('.sheet, .sheet-bg').forEach(e => e.remove()); }
 
 async function sha256(s) {
+  if (!crypto.subtle) { let h = 5381; for (const c of s) h = (h * 33 ^ c.codePointAt(0)) >>> 0; return 'djb2-' + h.toString(16); }
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
   return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
@@ -131,12 +142,13 @@ const logo = `<svg class="logo" viewBox="0 0 64 64"><defs><linearGradient id="lg
 const TABS = [
   ['home', 'Accueil', 'home'], ['markets', 'Marchés', 'chart'], ['ai', 'IA', 'spark'], ['squawk', 'Squawk', 'radio'], ['more', 'Plus', 'grid'],
 ];
-const PUBLIC = ['welcome', 'login', 'signup', 'forgot', 'magic', 'pricing', 'legal'];
+const PUBLIC = ['welcome', 'login', 'signup', 'forgot', 'magic', 'legal'];
 
 function route() {
   const h = location.hash.replace(/^#\/?/, '') || (state.user ? 'home' : 'welcome');
   const [name, ...args] = h.split('/');
   if (name === 'settings' && args[0] === 'api') return { name: 'api', args: [] };
+  if (name === 'settings' && args[0] === 'feed') return { name: 'feedcfg', args: [] };
   return { name, args: args.map(decodeURIComponent) };
 }
 const go = (path) => { location.hash = '#/' + path; };
@@ -164,7 +176,7 @@ function render() {
       <h1>${esc(title)}</h1>
       ${state.user ? `
         <button class="icon-btn" data-go="settings/api" aria-label="Clé API Claude" title="Clé API Claude">${icon('key')}<i class="dot ${connected ? 'ok' : ''}"></i></button>
-        <button class="icon-btn" data-go="settings" aria-label="Réglages">${icon('gear')}</button>` :
+        <button class="icon-btn" data-go="alerts" aria-label="Alertes" title="Alertes">${icon('bell')}${activeAlerts() ? `<i class="dot ok" style="background:var(--accent)"></i>` : ''}</button>` :
         `<button class="btn small" data-go="login">Se connecter</button>`}
     </header>`;
 
@@ -198,15 +210,23 @@ function gauge(conv, v) {
 }
 
 function assetTile(a) {
-  const b = state.bias[a.id], p = state.prices[a.id];
+  const b = state.bias[a.id], p = priceOf(a.id);
   return `<div class="card tap asset-tile" data-go="asset/${a.id}">
-    <div class="row between"><span class="sym">${a.id}</span><span class="small muted">${esc(a.cls)}</span></div>
-    <div class="price mono"><span data-price="${a.id}">${fmt(p.price, decimals(a.id))}</span>
+    <div class="row between"><span class="sym">${a.id}</span><span class="small" data-live="${a.id}">${liveTag(a.id)}</span></div>
+    <div class="price mono"><span data-price="${a.id}" style="${p.live ? '' : 'opacity:.55'}">${fmt(p.price, decimals(a.id))}</span>
       <span data-chg="${a.id}" class="small ${p.chg >= 0 ? 'v-bull' : 'v-bear'}">${p.chg >= 0 ? '+' : ''}${fmt(p.chg, 2)} %</span></div>
     <div class="verdict"><span class="small v-${vKey(b.v)}" style="font-weight:700">${vArrow(b.v)} ${vLabel(b.v)}</span><b class="small">${b.conv}%</b></div>
     <div class="bar" style="margin-top:6px"><span style="width:${b.conv}%;background:var(--${vKey(b.v)})"></span></div>
   </div>`;
 }
+
+function liveTag(id) {
+  const q = FEED.quotes[id];
+  if (FEED.isLive(id)) return '<span class="v-bull" style="font-weight:700">● réel</span>';
+  if (q) return '<span class="v-neutral" style="font-weight:700">● périmé</span>';
+  return '<span class="muted">○ démo</span>';
+}
+function activeAlerts() { return AL.alerts.filter(a => a.status === 'active' || a.status === 'waiting' || a.status === 'open').length; }
 
 function squawkItem(s, isNew = false) {
   return `<div class="card squawk ${isNew ? 'new' : ''}" data-id="${s.id}">
@@ -262,8 +282,9 @@ function marketContext() {
   const bias = D.ASSETS.map(a => { const b = state.bias[a.id]; return `${a.id}: ${vLabel(b.v)} ${b.conv}% (${b.drivers.slice(0, 2).join('; ')})`; }).join('\n');
   const sq = state.squawk.slice(0, 6).map(s => `[${s.t} ${s.cc} ${s.sev}] ${s.text}`).join('\n');
   const regimes = D.REGIMES.map(r => `${r.zone} ${r.label}`).join(', ');
+  const px = D.ASSETS.map(a => FEED.isLive(a.id) ? `${a.id} ${fmtP(a.id, FEED.quotes[a.id].price)} (${FEED.status(a.id).text})` : `${a.id} : pas de cotation réelle`).join('\n');
   return `Date : ${new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}\n` +
-    `Biais affichés dans l'app (source : ${state.biasMeta.source}) :\n${bias}\n\nDerniers squawks :\n${sq}\n\nRégimes macro : ${regimes}`;
+    `Cotations réelles :\n${px}\n\nBiais affichés dans l'app (source : ${state.biasMeta.source}) :\n${bias}\n\nDerniers squawks :\n${sq}\n\nRégimes macro : ${regimes}`;
 }
 
 /* =========================================================================
@@ -274,9 +295,8 @@ screen('welcome', D.BRAND.name, () => `
     <span class="pill bg-accent">${icon('spark').replace('<svg', '<svg width="12" height="12"')} Propulsé par Claude</span>
     <h2>Anticipez les marchés avant qu’ils ne bougent.</h2>
     <p>Quand un choc macro tombe, l’IA vous dit de quel côté le marché penche : haussier ou baissier. La décision reste la vôtre.</p>
-    <div class="stack"><button class="btn primary block" data-go="signup">Commencer gratuitement</button>
+    <div class="stack"><button class="btn primary block" data-go="signup">Créer un compte</button>
     <button class="btn block" data-act="demo">Voir la démo</button></div>
-    <p class="small" style="margin:12px 0 0">Essai gratuit de 7 jours · rappel avant la fin · annulation en un clic</p>
   </section>
 
   <h2>6 onglets ouverts pour analyser un seul trade</h2>
@@ -307,7 +327,7 @@ screen('welcome', D.BRAND.name, () => `
   ${testimonials()}
 
   <div class="card glow" style="margin-top:20px;text-align:center"><h3>Rejoignez les traders qui anticipent les marchés</h3>
-    <div class="grid-2" style="margin-top:12px"><button class="btn primary" data-go="signup">Commencer</button><button class="btn" data-go="pricing">Voir les offres</button></div></div>
+    <div class="grid-2" style="margin-top:12px"><button class="btn primary" data-go="signup">Créer un compte</button><button class="btn" data-go="login">Se connecter</button></div></div>
   ${footer()}
 `, { noTabs: true });
 
@@ -321,7 +341,7 @@ function testimonials() {
 }
 function footer() {
   return `<p class="disclaimer">${D.BRAND.tagline}.<br>Les lectures fournies sont informatives et ne constituent pas un conseil en investissement.<br>
-    <button class="link small" data-go="legal">Mentions légales et CGU</button> · <button class="link small" data-go="pricing">Tarifs</button></p>`;
+    <button class="link small" data-go="legal">Mentions légales et CGU</button></p>`;
 }
 
 screen('login', 'Connexion', () => `
@@ -364,13 +384,12 @@ screen('login', 'Connexion', () => `
 
 screen('signup', 'Créer un compte', () => `
   <div class="auth">
-    <div class="brand">${logo.replace('class="logo"', '')}<h1>Créez votre compte</h1><p class="muted">7 jours d’essai gratuit</p></div>
+    <div class="brand">${logo.replace('class="logo"', '')}<h1>Créez votre compte</h1><p class="muted">Terminal macro propulsé par l’IA</p></div>
     <form id="signupForm">
       <label class="field"><span>Adresse e-mail</span><input class="input" type="email" name="email" required autocomplete="email"></label>
       <label class="field"><span>Mot de passe (8 caractères min.)</span><input class="input" type="password" name="password" minlength="8" required autocomplete="new-password"></label>
       <label class="field"><span>Pays</span><select class="input" name="country" required><option value="">Sélectionner un pays…</option>${D.COUNTRY_LIST.map(c => `<option>${c}</option>`).join('')}</select></label>
-      <label class="field"><span>Code parrain (facultatif)</span><input class="input" name="referral" autocomplete="off"></label>
-      <label class="check"><input type="checkbox" name="optin"> Recevoir les nouveautés, conseils et offres. Désabonnement possible à tout moment.</label>
+      <label class="check"><input type="checkbox" name="optin"> Recevoir les nouveautés et conseils. Désabonnement possible à tout moment.</label>
       <button class="btn primary block" type="submit">Créer mon compte</button>
     </form>
     <p class="small muted" style="text-align:center;margin-top:18px">Déjà un compte ? <button class="link" data-go="login">Se connecter</button></p>
@@ -381,9 +400,8 @@ screen('signup', 'Créer un compte', () => `
       e.preventDefault();
       const f = new FormData(e.target), email = f.get('email').trim().toLowerCase();
       if (state.accounts[email]) return toast('Un compte existe déjà pour cette adresse.');
-      const acc = { email, hash: await sha256(f.get('password')), country: f.get('country'), referral: f.get('referral') || '',
-        optin: !!f.get('optin'), plan: 'pro', trialEnds: Date.now() + 7 * 864e5, createdAt: Date.now() };
-      state.accounts[email] = acc; login(acc); toast('Bienvenue ! Votre essai de 7 jours commence.');
+      const acc = { email, hash: await sha256(f.get('password')), country: f.get('country'), optin: !!f.get('optin'), createdAt: Date.now() };
+      state.accounts[email] = acc; login(acc); toast('Bienvenue !');
     };
   },
 });
@@ -395,7 +413,7 @@ screen('forgot', 'Mot de passe oublié', () => `
   <p style="text-align:center"><button class="link" data-go="login">Retour à la connexion</button></p></div>`, { noTabs: true, bare: true });
 
 function login(acc) {
-  state.user = { email: acc.email, country: acc.country, plan: acc.plan, trialEnds: acc.trialEnds, demo: !!acc.demo };
+  state.user = { email: acc.email, country: acc.country, demo: !!acc.demo };
   save(); go('home');
 }
 
@@ -404,13 +422,12 @@ function login(acc) {
    ========================================================================= */
 screen('home', 'Tableau de bord', () => {
   const fav = D.ASSETS.filter(a => state.favorites.includes(a.id));
-  const daysLeft = state.user?.trialEnds ? Math.max(0, Math.ceil((state.user.trialEnds - Date.now()) / 864e5)) : 0;
   const t = state.homeTab;
   return `
   ${!AI.isConnected() ? `<div class="card glow tap" data-go="settings/api" style="margin-bottom:12px"><div class="row">${icon('key')}<div style="flex:1"><b>Connectez Claude</b><div class="small muted">Ajoutez votre clé API pour activer l’analyse IA en direct.</div></div>›</div></div>` : ''}
   <div class="card glow">
     <div class="row between"><span class="small muted">Biais du jour · ${state.biasMeta.source === 'claude' ? 'généré par Claude' : 'démo'}${state.biasMeta.at ? ' · ' + new Date(state.biasMeta.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : ''}</span>
-      ${state.user?.demo ? '<span class="chip">Démo</span>' : daysLeft ? `<span class="chip">Essai : ${daysLeft} j</span>` : ''}</div>
+      ${state.user?.demo ? '<span class="chip">Démo</span>' : ''}</div>
     <h2 style="margin:6px 0 4px">${biasSummary()}</h2>
     ${state.biasMeta.summary ? `<p class="small" style="margin:4px 0 10px">${esc(state.biasMeta.summary)}</p>` : ''}
     <div class="grid-2" style="margin-top:10px"><button class="btn small" data-go="bias">Voir les 9 verdicts</button>
@@ -420,7 +437,10 @@ screen('home', 'Tableau de bord', () => {
   <div class="section-title"><h2>Mes actifs</h2><button class="link" data-go="markets">Tout voir</button></div>
   <div class="grid-2">${fav.map(assetTile).join('') || '<p class="muted small">Ajoutez des favoris depuis la fiche d’un actif.</p>'}</div>
 
-  <div class="section-title"><h2>Couverture macro</h2><span class="live">LIVE</span></div>
+  <div class="section-title"><h2>Mes alertes</h2><button class="link" data-go="alerts">Gérer</button></div>
+  ${alertsSummaryCard()}
+
+  <div class="section-title"><h2>Couverture macro</h2><span class="chip">Flux simulé</span></div>
   <div class="seg" style="margin-bottom:10px">${[['events', 'Événements'], ['macro', 'Macro'], ['fx', 'Devises']].map(([k, l]) => `<button class="${t === k ? 'on' : ''}" data-act="homeTab" data-tab="${k}">${l}</button>`).join('')}</div>
   ${t === 'events' ? state.squawk.slice(0, 3).map(s => squawkItem(s)).join('') + `<button class="btn block small" style="margin-top:10px" data-go="squawk">Tout le flux</button>` : ''}
   ${t === 'macro' ? `<div class="grid-4">${D.REGIMES.map(r => `<div class="regime"><b>${flag(r.zone)} ${r.zone}</b><span class="v-${vKey(r.tone)}">${r.label}</span></div>`).join('')}</div>` : ''}
@@ -465,14 +485,23 @@ screen('markets', 'Marchés', () => {
 const ANGLES = [['macro', 'Macroéconomique'], ['fonda', 'Fondamental'], ['geo', 'Géopolitique'], ['quant', 'Quantitatif']];
 screen('asset', id => id, (id) => {
   const a = D.ASSETS.find(x => x.id === id); if (!a) return '<div class="empty">Actif introuvable.</div>';
-  const b = state.bias[id], p = state.prices[id], fav = state.favorites.includes(id);
+  const b = state.bias[id], p = priceOf(id), fav = state.favorites.includes(id);
+  const st = FEED.status(id), mine = AL.alerts.filter(x => x.asset === id && ['active', 'waiting', 'open'].includes(x.status));
   const seas = D.SEASONALITY[id];
   return `
   <div class="card"><div class="row between"><div><div class="small muted">${esc(a.cls)}</div><h2 style="margin:2px 0">${esc(a.name)}</h2></div>
     <button class="icon-btn" data-act="fav" data-id="${id}" aria-label="Favori" style="color:${fav ? 'var(--neutral)' : 'inherit'}">${icon('star')}</button></div>
-    <div class="mono" style="font-size:24px;font-weight:800"><span data-price="${id}">${fmt(p.price, decimals(id))}</span>
+    <div class="mono" style="font-size:24px;font-weight:800"><span data-price="${id}" style="${p.live ? '' : 'opacity:.55'}">${fmt(p.price, decimals(id))}</span>
       <span data-chg="${id}" class="small ${p.chg >= 0 ? 'v-bull' : 'v-bear'}">${p.chg >= 0 ? '+' : ''}${fmt(p.chg, 2)} %</span></div>
-    <canvas id="spark" height="70" style="width:100%;margin-top:8px"></canvas></div>
+    <div class="small" style="margin-top:4px" data-status="${id}">${feedLine(id)}</div>
+    <canvas id="spark" height="70" style="width:100%;margin-top:8px"></canvas>
+    <div class="small muted" id="sparkNote"></div></div>
+
+  <div class="section-title"><h2>Alertes sur ${id}</h2><button class="link" data-go="alerts">Toutes</button></div>
+  ${st.live ? '' : `<div class="notice" style="margin-bottom:10px">⚠️ Pas de cotation réelle pour cet actif (${esc(st.text)}). Les alertes restent enregistrées mais ne se déclenchent que sur un flux réel.${!FEED.getFeedConfig().tdKey && FEED.SOURCES_INFO[id] ? ' <button class="link" data-go="settings/feed">Ajouter une clé Twelve Data →</button>' : ''}</div>`}
+  ${mine.map(alertCard).join('')}
+  <div class="grid-2" style="margin:10px 0 12px"><button class="btn" data-act="newLevel" data-id="${id}">${icon('bell').replace('<svg', '<svg width="16" height="16"')} Alerte de niveau</button>
+    <button class="btn primary" data-act="newTrade" data-id="${id}">${icon('target').replace('<svg', '<svg width="16" height="16"')} Suivre un trade</button></div>
 
   <div class="card" style="text-align:center"><div class="small muted">Verdict du jour</div>${gauge(b.conv, b.v)}
     <div style="margin-top:8px">${pill(b.v, ' · conviction ' + b.conv + '%')}</div></div>
@@ -493,23 +522,25 @@ screen('asset', id => id, (id) => {
 }, {
   tab: 'markets',
   mount(id) {
+    drawSpark(id);
+  },
+});
+
+/** Mini-graphique construit uniquement à partir des cotations réelles reçues pendant la session. */
+function drawSpark(id) {
     const cv = $('#spark'); if (!cv) return;
-    // Série intrajournalière simulée, reconstruite à rebours depuis le dernier prix.
-    const end = state.prices[id].price, start = end / (1 + state.prices[id].chg / 100);
-    const pts = []; let noise = 0, seed = id.length * 97;
-    for (let i = 0; i <= 60; i++) {
-      seed = (seed * 9301 + 49297) % 233280; noise += ((seed / 233280) - 0.5) * 0.004;
-      const t = i / 60; pts.push((start + (end - start) * t) * (1 + noise * Math.sin(Math.PI * t)));
-    }
+    const pts = (state.history[id] || []).map(h => h.p);
+    const note = $('#sparkNote');
+    if (pts.length < 2) { cv.style.display = 'none'; if (note) note.textContent = FEED.quotes[id] ? 'Graphique en cours de constitution à partir des cotations réelles…' : 'Graphique disponible dès réception d’un flux réel.'; return; }
+    cv.style.display = ''; if (note) note.textContent = `${pts.length} cotations réelles depuis l’ouverture de l’app`;
     const dpr = devicePixelRatio || 1, w = cv.clientWidth, h = 70; cv.width = w * dpr; cv.height = h * dpr;
     const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);
     const mn = Math.min(...pts), mx = Math.max(...pts);
-    const col = getComputedStyle(document.documentElement).getPropertyValue(state.prices[id].chg >= 0 ? '--bull' : '--bear').trim();
+    const col = getComputedStyle(document.documentElement).getPropertyValue(pts[pts.length - 1] >= pts[0] ? '--bull' : '--bear').trim();
     ctx.beginPath(); pts.forEach((p, i) => { const x = i / (pts.length - 1) * w, y = h - 4 - (p - mn) / (mx - mn || 1) * (h - 8); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
     ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
     ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath(); ctx.globalAlpha = .12; ctx.fillStyle = col; ctx.fill();
-  },
-});
+}
 
 function seasonBars(vals) {
   const m = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'], cur = new Date().getMonth();
@@ -527,7 +558,8 @@ function seasonBars(vals) {
 screen('squawk', 'Squawk temps réel', () => {
   const filters = ['ALL', 'CRITIQUE', ...D.ASSETS.map(a => a.id)];
   const list = state.squawk.filter(s => state.squawkFilter === 'ALL' || s.sev === state.squawkFilter || s.assets.includes(state.squawkFilter));
-  return `<div class="row between" style="margin-bottom:10px"><span class="live">${state.prefs.live ? 'EN DIRECT' : 'EN PAUSE'}</span>
+  return `<div class="notice" style="margin-bottom:10px">Flux d’actualités <b>simulé</b> à des fins de démonstration : ne prenez pas de position sur ces messages. Les alertes de prix, elles, utilisent des cotations réelles.</div>
+    <div class="row between" style="margin-bottom:10px"><span class="live">${state.prefs.live ? 'SIMULATION' : 'EN PAUSE'}</span>
       <button class="btn small" data-act="toggleLive">${state.prefs.live ? 'Pause' : 'Reprendre'}</button></div>
     <div class="suggests" style="margin-bottom:10px">${filters.map(f => `<button class="btn small ${state.squawkFilter === f ? 'primary' : ''}" data-act="sqFilter" data-f="${f}">${f === 'ALL' ? 'Tout' : f}</button>`).join('')}</div>
     <div id="sqList">${list.map(s => squawkItem(s)).join('') || '<div class="empty">Aucun événement pour ce filtre.</div>'}</div>`;
@@ -553,7 +585,7 @@ function pushSquawk() {
     state.unread++;
     const tabLabel = document.querySelector('.tabbar button[data-go=squawk] span');
     if (tabLabel) tabLabel.textContent = `Squawk (${state.unread})`;
-    if (state.prefs.notif && state.user && (item.sev === 'CRITIQUE' || item.sev === 'ÉLEVÉ')) toast(`${flag(item.cc)} ${item.sev} · ${item.text.slice(0, 70)}…`);
+    if (state.prefs.notif && state.user && (item.sev === 'CRITIQUE' || item.sev === 'ÉLEVÉ')) toast(`[démo] ${flag(item.cc)} ${item.sev} · ${item.text.slice(0, 60)}…`);
   }
 }
 
@@ -648,20 +680,21 @@ const FEATURES = [
   ]],
   ['Agir', [
     ['home', 'Dashboard', 'Votre vue principale', 'home'],
-    ['opportunities', 'Opportunités', 'Setups directionnels', 'target', true],
+    ['alerts', 'Alertes & trades', 'Niveaux, entrée, SL, TP', 'bell'],
+    ['opportunities', 'Idées de setups', 'Exemples à adapter', 'target'],
     ['markets', 'Actifs', 'Les 9 marchés suivis', 'chart'],
     ['support', 'Support', 'Discuter avec l’équipe', 'chat'],
   ]],
   ['Compte', [
     ['settings/api', 'Clé API Claude', 'Connecter l’IA', 'key'],
     ['claude-code', 'Claude Code', 'Utiliser l’app avec Claude Code', 'term'],
-    ['pricing', 'Abonnement', 'Offres et facturation', 'tag'],
+    ['settings/feed', 'Flux de prix', 'Sources et clé Twelve Data', 'trend'],
     ['settings', 'Réglages', 'Thème, notifications, compte', 'gear'],
     ['about', 'À propos', 'Présentation et avis', 'info'],
   ]],
 ];
 screen('more', 'Plateforme', () => FEATURES.map(([g, items]) => `<div class="section-title"><h2>${g}</h2></div><div class="card" style="padding:2px 14px">
-  ${items.map(([r, t, d, ic, pro]) => `<div class="list-item" data-go="${r}"><div class="ico">${icon(ic)}</div><div class="txt"><b>${t} ${pro ? '<span class="badge-pro">PRO</span>' : ''}</b><small>${d}</small></div><span class="muted">›</span></div>`).join('')}</div>`).join('') + footer());
+  ${items.map(([r, t, d, ic]) => `<div class="list-item" data-go="${r}"><div class="ico">${icon(ic)}</div><div class="txt"><b>${t}</b><small>${d}</small></div><span class="muted">›</span></div>`).join('')}</div>`).join('') + footer());
 
 screen('about', 'À propos', () => SCREENS.welcome.fn().replace(/<section class="hero">[\s\S]*?<\/section>/, `<div class="hero"><h2>${D.BRAND.name}</h2><p>${D.BRAND.tagline}.</p></div>`), { tab: 'more' });
 
@@ -775,54 +808,28 @@ screen('predictions', 'Marchés prédictifs', () => D.PREDICTION_MARKETS.map(p =
   <div class="bar"><span style="width:${p.yes}%;background:var(--bull)"></span></div>
   <div class="small muted" style="margin-top:6px">${p.src} · volume ${p.vol}</div></div>`).join(''), { tab: 'more' });
 
-/* ---- Opportunités (Pro) ---- */
-screen('opportunities', 'Opportunités', () => `
-  <div class="card glow"><div class="row between"><b>Opportunités directionnelles</b><span class="badge-pro">PRO</span></div>
-    <p class="small muted" style="margin:6px 0 0">Setups avec niveaux de stop et d’objectif (bêta). Performance publiée telle quelle.</p></div>
-  ${D.OPPORTUNITIES.map(o => `<div class="card"><div class="row between"><div><b>${o.asset}</b> ${pill(o.dir)}</div>
-    <span class="pill ${o.status === 'Active' ? 'bg-accent' : o.status === 'Cible atteinte' ? 'bg-bull' : 'bg-bear'}">${o.status}</span></div>
+/* ---- Idées de setups (exemples) ---- */
+screen('opportunities', 'Idées de setups', () => `
+  <div class="notice">Ces setups sont des <b>exemples fictifs</b> pour illustrer la méthode : ils ne sont ni suivis ni mis à jour. Pour être alerté, créez votre propre trade avec <b>vos</b> niveaux d’entrée, de SL et de TP.</div>
+  ${D.OPPORTUNITIES.map((o, i) => `<div class="card"><div class="row between"><div><b>${o.asset}</b> ${pill(o.dir)}</div><span class="chip">Exemple</span></div>
     <div class="grid-4 small" style="margin-top:10px;text-align:center"><div><div class="muted">Entrée</div><b class="mono">${o.entry}</b></div><div><div class="muted">Stop</div><b class="mono v-bear">${o.stop}</b></div>
-    <div><div class="muted">Objectif</div><b class="mono v-bull">${o.target}</b></div><div><div class="muted">R/R</div><b class="mono">${o.rr}</b></div></div></div>`).join('')}
-  <div class="card"><div class="row between"><span class="small muted">Taux de réussite (30 j)</span><b>58 %</b></div><div class="row between"><span class="small muted">R/R moyen</span><b>2,1</b></div></div>
-  <div class="card tap" data-act="telegram"><div class="row">${icon('send')}<div><b>Canal Telegram privé</b><div class="small muted">Recevoir les opportunités en temps réel</div></div></div></div>
+    <div><div class="muted">Objectif</div><b class="mono v-bull">${o.target}</b></div><div><div class="muted">R/R</div><b class="mono">${o.rr}</b></div></div>
+    <button class="btn small block" style="margin-top:10px" data-act="newTrade" data-id="${o.asset}" data-dir="${o.dir}">Suivre ce type de trade avec mes niveaux</button></div>`).join('')}
   <p class="disclaimer">Ces setups ne sont pas des conseils en investissement.</p>`, { tab: 'more' });
 
 /* ---- Support ---- */
 screen('support', 'Support', () => `
   <div class="card"><h3>Discuter avec l’équipe</h3><p class="small muted">Réponse en moins de 24 h ouvrées.</p>
-    <label class="field"><span>Sujet</span><select class="input" id="supSubject"><option>Question sur l’abonnement</option><option>Problème technique</option><option>Clé API / Claude</option><option>Suggestion</option></select></label>
+    <label class="field"><span>Sujet</span><select class="input" id="supSubject"><option>Alertes et flux de prix</option><option>Problème technique</option><option>Clé API / Claude</option><option>Suggestion</option></select></label>
     <label class="field"><span>Message</span><textarea class="input" id="supMsg" rows="5"></textarea></label>
     <button class="btn primary block" data-act="supportSend">Envoyer</button></div>
   <div class="section-title"><h2>FAQ</h2></div>
   ${[['Les lectures sont-elles des conseils en investissement ?', 'Non. Elles sont fournies à titre d’information. Vous gardez la décision.'],
-     ['Comment fonctionne l’essai gratuit ?', '7 jours gratuits. Rappel avant la fin, annulation en un clic.'],
+     ['Les alertes SL / TP passent-elles mes ordres ?', 'Non. L’application vous prévient ; vous passez et ajustez vos ordres vous-même chez votre broker.'],
+     ['Pourquoi une alerte peut-elle différer de mon broker ?', 'Le flux (Kraken, Coinbase, Twelve Data) n’est pas celui de votre broker : spreads, heures de cotation et instruments (ex. PAXG pour l’or) diffèrent. Les prix sont relevés toutes les 20 s (5 min pour Twelve Data).'],
      ['Où est stockée ma clé API Claude ?', 'Uniquement sur cet appareil (stockage local). Elle n’est envoyée qu’à api.anthropic.com.'],
      ['Puis-je utiliser l’app avec Claude Code ?', 'Oui : voir Plus › Claude Code pour exporter le contexte de marché et utiliser la même clé.']]
     .map(([q, a]) => `<details class="card"><summary style="cursor:pointer;font-weight:600">${q}</summary><p class="small muted" style="margin:8px 0 0">${a}</p></details>`).join('')}`, { tab: 'more' });
-
-/* ---- Tarifs ---- */
-screen('pricing', 'Choisissez votre offre', () => {
-  const y = state.prefs.billing === 'yearly';
-  return `<div class="seg" style="margin-bottom:14px"><button class="${!y ? 'on' : ''}" data-act="billing" data-b="monthly">Mensuel</button><button class="${y ? 'on' : ''}" data-act="billing" data-b="yearly">Annuel · 2 mois offerts</button></div>
-  ${D.PLANS.map(p => `<div class="card plan ${p.recommended ? 'rec' : ''}"><div class="row between"><h3 style="margin:0">${p.name}</h3>${p.recommended ? '<span class="pill bg-accent">Recommandé</span>' : ''}${state.user?.plan === p.id ? '<span class="chip">Offre actuelle</span>' : ''}</div>
-    <p class="small muted" style="margin:4px 0 10px">${p.tag}</p>
-    <div class="price">${p.custom ? 'Sur devis' : `${y ? Math.round(p.yearly / 12) : p.monthly} €<span class="small muted" style="font-weight:400"> /mois${y ? ', facturé ' + p.yearly + ' €/an' : ''}</span>`}</div>
-    <div style="margin:10px 0">${p.features.map(f => `<div class="feat">${esc(f)}</div>`).join('')}</div>
-    ${p.custom ? `<a class="btn block" href="mailto:contact@example.com?subject=Offre%20Enterprise">Nous contacter</a>` :
-      `<button class="btn block ${p.recommended ? 'primary' : ''}" data-act="choosePlan" data-p="${p.id}">Démarrer l’essai gratuit</button>`}</div>`).join('')}
-  <p class="small muted" style="text-align:center">${icon('shield').replace('<svg', '<svg width="14" height="14" style="vertical-align:-2px"')} Annulable à tout moment · Paiements sécurisés · Aucun débit avant la fin de l’essai</p>
-  <div class="section-title"><h2>Manuel vs ${D.BRAND.name}</h2></div>${comparisonTable()}`;
-}, {
-  tab: 'more',
-  mount() {
-    ACTIONS.billing = el => { state.prefs.billing = el.dataset.b; save(); render(); };
-    ACTIONS.choosePlan = el => {
-      if (!state.user) return go('signup');
-      state.user.plan = el.dataset.p; const acc = state.accounts[state.user.email]; if (acc) acc.plan = el.dataset.p; save();
-      toast(`Offre ${el.dataset.p === 'pro' ? 'Pro' : 'Basic'} activée (essai 7 jours, démo sans paiement).`); render();
-    };
-  },
-});
 
 screen('legal', 'Mentions légales', () => `<div class="card small" style="line-height:1.55">
   <h3>Avertissement</h3><p>Les informations, biais et analyses affichés sont fournis à titre purement informatif et ne constituent ni un conseil en investissement, ni une recommandation d’achat ou de vente.</p>
@@ -836,7 +843,7 @@ screen('legal', 'Mentions légales', () => `<div class="card small" style="line-
 screen('settings', 'Réglages', () => {
   const u = state.user || {};
   return `<div class="card"><div class="row"><div class="ico" style="width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:grid;place-items:center;color:#061021;font-weight:800">${esc((u.email || '?')[0].toUpperCase())}</div>
-    <div style="flex:1;min-width:0"><b style="display:block;overflow:hidden;text-overflow:ellipsis">${esc(u.email)}</b><span class="small muted">Offre ${esc(u.plan || '—')} · ${esc(u.country || '')}</span></div></div></div>
+    <div style="flex:1;min-width:0"><b style="display:block;overflow:hidden;text-overflow:ellipsis">${esc(u.email)}</b><span class="small muted">${esc(u.country || '')}</span></div></div></div>
 
   <div class="section-title"><h2>Intelligence artificielle</h2></div>
   <div class="card" style="padding:2px 14px">
@@ -847,14 +854,15 @@ screen('settings', 'Réglages', () => {
   <div class="section-title"><h2>Préférences</h2></div>
   <div class="card" style="padding:2px 14px">
     ${toggleRow('theme', 'Thème clair', 'sun', state.prefs.theme === 'light')}
-    ${toggleRow('notif', 'Alertes squawk critiques', 'bell', state.prefs.notif)}
+    ${toggleRow('notif', 'Alertes squawk (démo)', 'bell', state.prefs.notif)}
+    ${toggleRow('sound', 'Son et vibration des alertes', 'radio', state.prefs.sound)}
     ${toggleRow('live', 'Flux en direct', 'radio', state.prefs.live)}
   </div>
 
   <div class="section-title"><h2>Compte</h2></div>
   <div class="card" style="padding:2px 14px">
-    <div class="list-item" data-go="pricing"><div class="ico">${icon('tag')}</div><div class="txt"><b>Abonnement</b><small>Changer d’offre</small></div><span class="muted">›</span></div>
-    <div class="list-item" data-act="affiliate"><div class="ico">${icon('users')}</div><div class="txt"><b>Programme d’affiliation</b><small>Parrainez et gagnez des mois offerts</small></div><span class="muted">›</span></div>
+    <div class="list-item" data-go="alerts"><div class="ico">${icon('bell')}</div><div class="txt"><b>Alertes & notifications</b><small>${notifStateText()}</small></div><span class="muted">›</span></div>
+    <div class="list-item" data-go="settings/feed"><div class="ico">${icon('trend')}</div><div class="txt"><b>Flux de prix</b><small>${FEED.getFeedConfig().tdKey ? 'Twelve Data connecté' : 'Kraken + Coinbase (sans clé)'}</small></div><span class="muted">›</span></div>
     <div class="list-item" data-go="legal"><div class="ico">${icon('doc')}</div><div class="txt"><b>Mentions légales</b><small>CGU, confidentialité, cookies</small></div><span class="muted">›</span></div>
     <div class="list-item" data-act="logout"><div class="ico">${icon('out')}</div><div class="txt"><b class="v-bear">Se déconnecter</b></div></div>
   </div>
@@ -953,7 +961,7 @@ claude "Ajoute un nouvel actif DAX avec son biais"</pre>
    Actions
    ========================================================================= */
 const ACTIONS = {
-  demo() { login({ email: 'demo@demo.local', country: 'France', plan: 'pro', trialEnds: Date.now() + 7 * 864e5, demo: true }); toast('Mode démo : explorez librement.'); },
+  demo() { login({ email: 'demo@demo.local', country: 'France', demo: true }); toast('Mode démo : explorez librement.'); },
   magicOpen(el) { const acc = state.accounts[el.dataset.email]; closeSheet(); if (acc) login(acc); },
   forgotSend() { const v = $('#fEmail').value.trim(); if (!v) return toast('Saisissez votre e-mail.'); toast('Si un compte existe, un lien a été envoyé (démo).'); go('login'); },
   logout() { state.user = null; save(); go('welcome'); },
@@ -1023,12 +1031,6 @@ Les drivers sont des phrases courtes en français.`,
     if (document.body.contains(btn)) { btn.disabled = false; btn.innerHTML = old; }
     render();
   },
-  telegram() { toast('Canal Telegram réservé aux abonnés Pro (démo).'); },
-  affiliate() {
-    const code = (state.user?.email || 'demo').split('@')[0].toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) + '30';
-    sheet(`<h2 style="margin-top:0">Programme d’affiliation</h2><p class="muted">Partagez votre code : vos filleuls obtiennent 30 % de remise et vous gagnez un mois offert par abonnement.</p>
-      <div class="card row between"><b class="mono" style="font-size:20px">${code}</b><button class="btn small" data-act="copy" data-t="${code}">Copier</button></div>`);
-  },
   async copy(el) { await copyText(el.dataset.t); },
   supportSend() {
     const msg = $('#supMsg').value.trim(); if (!msg) return toast('Écrivez votre message.');
@@ -1040,7 +1042,7 @@ Les drivers sont des phrases courtes en français.`,
   async copyContext() { await copyText(contextMarkdown()); },
   downloadJson() {
     const data = { generatedAt: new Date().toISOString(), biasSource: state.biasMeta.source, summary: state.biasMeta.summary,
-      bias: state.bias, prices: state.prices, squawk: state.squawk.slice(0, 20), regimes: D.REGIMES, drivers: D.DRIVERS };
+      bias: state.bias, quotes: FEED.quotes, alerts: AL.alerts, squawk: state.squawk.slice(0, 20), regimes: D.REGIMES, drivers: D.DRIVERS };
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
     a.download = `contexte-marche-${new Date().toISOString().slice(0, 10)}.json`; a.click();
@@ -1064,23 +1066,257 @@ function contextMarkdown() {
 }
 
 /* =========================================================================
-   Simulation temps réel des prix
+   Flux de prix réel, alertes et notifications
    ========================================================================= */
-function tickPrices() {
-  for (const a of D.ASSETS) {
-    const p = state.prices[a.id], d = (Math.random() - 0.5) * 0.0016;
-    p.price *= 1 + d; p.chg += d * 100;
-    document.querySelectorAll(`[data-price="${a.id}"]`).forEach(el => { el.textContent = fmt(p.price, decimals(a.id)); });
-    document.querySelectorAll(`[data-chg="${a.id}"]`).forEach(el => {
-      el.textContent = `${p.chg >= 0 ? '+' : ''}${fmt(p.chg, 2)} %`; el.className = `small ${p.chg >= 0 ? 'v-bull' : 'v-bear'}`;
+function feedLine(id) {
+  const st = FEED.status(id);
+  return `<span class="${st.live ? 'v-bull' : FEED.quotes[id] ? 'v-neutral' : 'muted'}">${st.live ? '●' : '○'}</span> <span class="muted">${esc(st.text)}</span>`;
+}
+
+function notifStateText() {
+  if (!('Notification' in window)) return 'Non prises en charge par ce navigateur';
+  if (!window.isSecureContext) return 'Nécessitent HTTPS';
+  return { granted: 'Notifications activées', denied: 'Notifications bloquées', default: 'Notifications à activer' }[Notification.permission];
+}
+
+function onQuotes(quotes) {
+  for (const [id, q] of Object.entries(quotes)) {
+    const h = state.history[id] || (state.history[id] = []);
+    if (!h.length || h[h.length - 1].t !== q.at) { h.push({ t: q.at, p: q.price }); if (h.length > 400) h.shift(); }
+    // Les alertes ne sont évaluées que sur une cotation réelle et fraîche.
+    if (FEED.isLive(id)) AL.evaluate(id, q.price, v => fmtP(id, v)).forEach(notify);
+    document.querySelectorAll(`[data-price="${id}"]`).forEach(el => { el.textContent = fmtP(id, q.price); el.style.opacity = FEED.isLive(id) ? '' : '.55'; });
+    document.querySelectorAll(`[data-chg="${id}"]`).forEach(el => {
+      el.textContent = `${q.chg >= 0 ? '+' : ''}${fmt(q.chg, 2)} %`; el.className = `small ${q.chg >= 0 ? 'v-bull' : 'v-bear'}`;
+    });
+    document.querySelectorAll(`[data-live="${id}"]`).forEach(el => { el.innerHTML = liveTag(id); });
+    document.querySelectorAll(`[data-status="${id}"]`).forEach(el => { el.innerHTML = feedLine(id); });
+    document.querySelectorAll(`[data-pnl]`).forEach(el => {
+      const t = AL.alerts.find(a => a.id === el.dataset.pnl); if (!t || t.asset !== id) return;
+      const v = AL.pnl(t, q.price); if (v !== null) { el.textContent = `${v >= 0 ? '+' : ''}${fmt(v, 2)} %`; el.className = `mono ${v >= 0 ? 'v-bull' : 'v-bear'}`; }
     });
   }
+  const r = route().name;
+  if (r === 'asset') drawSpark(route().args[0]);
 }
+
+let audioCtx = null;
+function beep(kind) {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const notes = kind === 'bad' ? [440, 330] : kind === 'good' ? [660, 880] : [740, 740];
+    notes.forEach((f, i) => {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain(), t = audioCtx.currentTime + i * 0.18;
+      o.frequency.value = f; g.gain.setValueAtTime(0.2, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+      o.connect(g).connect(audioCtx.destination); o.start(t); o.stop(t + 0.17);
+    });
+  } catch { /* audio indisponible */ }
+}
+
+async function notify(n) {
+  toast(`${n.title} · ${n.body}`);
+  if (state.prefs.sound) { beep(n.level); navigator.vibrate?.(n.level === 'bad' ? [300, 100, 300] : [200, 80, 200]); }
+  if ('Notification' in window && Notification.permission === 'granted') {
+    const opts = { body: n.body, tag: n.alertId + n.at, icon: 'icon.svg', badge: 'icon.svg', requireInteraction: true, vibrate: [200, 80, 200], data: { go: 'alerts' } };
+    try { const reg = await navigator.serviceWorker?.getRegistration(); if (reg) { await reg.showNotification(n.title, opts); return; } } catch { /* repli */ }
+    try { new Notification(n.title, opts); } catch { /* Android exige le service worker */ }
+  }
+  if (route().name === 'alerts') render();
+}
+
+function alertsSummaryCard() {
+  const act = AL.alerts.filter(a => ['active', 'waiting', 'open'].includes(a.status));
+  const open = act.filter(a => a.status === 'open').length, wait = act.filter(a => a.status === 'waiting').length, lv = act.filter(a => a.kind === 'level').length;
+  return `<div class="card tap" data-go="alerts"><div class="row between"><div><b>${act.length ? `${act.length} alerte${act.length > 1 ? 's' : ''} active${act.length > 1 ? 's' : ''}` : 'Aucune alerte'}</b>
+    <div class="small muted">${lv} niveau${lv > 1 ? 'x' : ''} · ${wait} trade${wait > 1 ? 's' : ''} en attente d’entrée · ${open} en position</div></div>
+    <span class="small">${notifStateText()}</span></div>
+    ${AL.log[0] ? `<div class="hr"></div><div class="small"><b>${esc(AL.log[0].title)}</b><div class="muted">${new Date(AL.log[0].at).toLocaleString('fr-FR')}</div></div>` : ''}</div>`;
+}
+
+const STATUS_LBL = { active: ['Active', 'bg-accent'], waiting: ['Attente entrée', 'bg-neutral'], open: ['En position', 'bg-bull'], triggered: ['Déclenchée', 'bg-accent'], closed: ['Clôturé', 'bg-neutral'], cancelled: ['Annulée', 'bg-neutral'] };
+const RESULT_LBL = { sl: ['Stop-loss', 'bg-bear'], be: ['Sortie au point mort', 'bg-neutral'], tp1: ['TP1 atteint', 'bg-bull'], tp2: ['TP2 atteint', 'bg-bull'] };
+
+function alertCard(a) {
+  const f = v => fmtP(a.asset, v);
+  const [lbl, cls] = a.status === 'closed' && a.result ? RESULT_LBL[a.result] : STATUS_LBL[a.status];
+  const live = FEED.isLive(a.asset), cur = FEED.quotes[a.asset]?.price;
+  const actions = ['active', 'waiting', 'open'].includes(a.status)
+    ? `<button class="btn small" data-act="cancelAlert" data-id="${a.id}">Annuler</button>` : `<button class="btn small" data-act="removeAlert" data-id="${a.id}">Supprimer</button>`;
+  if (a.kind === 'level') {
+    return `<div class="card"><div class="row between"><div><b>${a.asset}</b> <span class="small muted">niveau</span></div><span class="pill ${cls}">${lbl}</span></div>
+      <div class="row between" style="margin-top:8px"><div class="mono" style="font-size:18px;font-weight:800">${a.dir === 'up' ? '▲' : '▼'} ${f(a.level)}</div>
+        <div class="small muted" style="text-align:right">${cur ? `Prix ${f(cur)}<br>écart ${fmt((a.level / cur - 1) * 100, 2)} %` : 'pas de flux'}</div></div>
+      ${a.note ? `<div class="small muted">${esc(a.note)}</div>` : ''}
+      ${!live && a.status === 'active' ? '<div class="small v-neutral" style="margin-top:4px">En pause : aucune cotation réelle fraîche.</div>' : ''}
+      <div class="row between" style="margin-top:8px"><span class="small muted">${a.triggeredAt ? 'Déclenchée le ' + new Date(a.triggeredAt).toLocaleString('fr-FR') : 'Créée le ' + new Date(a.created).toLocaleDateString('fr-FR')}</span>${actions}</div></div>`;
+  }
+  const long = a.side === 'long', p = AL.pnl(a, cur);
+  return `<div class="card"><div class="row between"><div><b>${a.asset}</b> ${pill(long ? 1 : -1, long ? ' Achat' : ' Vente').replace(/Haussier|Baissier/, '')}</div><span class="pill ${cls}">${lbl}</span></div>
+    <div class="grid-4 small" style="margin-top:10px;text-align:center">
+      <div><div class="muted">Entrée</div><b class="mono">${f(a.entry)}</b></div>
+      <div><div class="muted">SL${a.slOriginal ? ' (BE)' : ''}</div><b class="mono v-bear">${f(a.sl)}</b></div>
+      <div><div class="muted">TP1</div><b class="mono v-bull">${f(a.tp1)}${a.tp1Hit ? ' ✓' : ''}</b></div>
+      <div><div class="muted">${a.tp2 ? 'TP2' : 'R/R'}</div><b class="mono ${a.tp2 ? 'v-bull' : ''}">${a.tp2 ? f(a.tp2) : fmt(AL.rr(a), 2)}</b></div></div>
+    <div class="row between small" style="margin-top:8px"><span class="muted">${cur ? 'Prix ' + f(cur) : 'pas de flux'}${a.tp2 ? ` · R/R ${fmt(AL.rr(a), 2)}` : ''}</span>
+      ${p !== null && a.status === 'open' ? `<span data-pnl="${a.id}" class="mono ${p >= 0 ? 'v-bull' : 'v-bear'}">${p >= 0 ? '+' : ''}${fmt(p, 2)} %</span>` : ''}</div>
+    ${a.note ? `<div class="small muted">${esc(a.note)}</div>` : ''}
+    ${!live && ['waiting', 'open'].includes(a.status) ? '<div class="small v-neutral" style="margin-top:4px">En pause : aucune cotation réelle fraîche.</div>' : ''}
+    ${a.events.length ? `<div class="small muted" style="margin-top:6px">${a.events.map(e => `${{ open: 'Ouvert', entry: 'Entrée', tp1: 'TP1', tp2: 'TP2', sl: 'SL' }[e.type]} ${f(e.price)} · ${new Date(e.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`).join(' → ')}</div>` : ''}
+    <div class="row between" style="margin-top:8px"><span></span><div class="row" style="gap:6px">${['waiting', 'open'].includes(a.status) ? `<button class="btn small" data-act="editTrade" data-id="${a.id}">Modifier</button>` : ''}${actions}</div></div></div>`;
+}
+
+screen('alerts', 'Alertes & trades', () => {
+  const act = AL.alerts.filter(a => ['active', 'waiting', 'open'].includes(a.status));
+  const done = AL.alerts.filter(a => !['active', 'waiting', 'open'].includes(a.status));
+  const perm = 'Notification' in window ? Notification.permission : 'unsupported';
+  return `
+  <div class="card glow"><b>Vous êtes prévenu, vous agissez dans votre broker.</b>
+    <p class="small muted" style="margin:6px 0 0">Alertes de niveau, entrée atteinte, stop-loss touché, TP1/TP2 atteints, proximité d’un niveau. L’application ne passe aucun ordre.</p></div>
+
+  <div class="section-title"><h2>Notifications</h2></div>
+  <div class="card">
+    <div class="row between"><div><b class="small">${notifStateText()}</b><div class="small muted">Toast, son et vibration dans l’app, + notification système si autorisée</div></div>
+      ${perm === 'default' && window.isSecureContext ? '<button class="btn small primary" data-act="enableNotif">Activer</button>' : '<button class="btn small" data-act="testNotif">Tester</button>'}</div>
+    ${perm === 'denied' ? '<div class="small v-bear" style="margin-top:8px">Autorisez les notifications pour ce site dans les réglages du navigateur.</div>' : ''}
+    ${!window.isSecureContext ? '<div class="small v-neutral" style="margin-top:8px">Les notifications système nécessitent que l’app soit servie en HTTPS (ou localhost).</div>' : ''}
+    <div class="notice small" style="margin-top:10px">⚠️ Sans serveur, les alertes ne sont surveillées que lorsque l’application est ouverte (au premier plan ou récemment). Sur téléphone verrouillé, le navigateur suspend la surveillance : à la réouverture, tout niveau franchi entre-temps est détecté et notifié.</div>
+  </div>
+
+  <div class="section-title"><h2>Flux de prix</h2><button class="link" data-go="settings/feed">Sources</button></div>
+  <div class="card">${D.ASSETS.map(a => `<div class="row between" style="padding:5px 0"><b class="small" style="width:64px">${a.id}</b><span class="small" style="flex:1;text-align:right" data-status="${a.id}">${feedLine(a.id)}</span></div>`).join('')}</div>
+
+  <div class="section-title"><h2>Actives (${act.length})</h2></div>
+  <div class="grid-2" style="margin-bottom:10px"><button class="btn" data-act="newLevel">${icon('bell').replace('<svg', '<svg width="16" height="16"')} Niveau</button><button class="btn primary" data-act="newTrade">${icon('target').replace('<svg', '<svg width="16" height="16"')} Trade (SL/TP)</button></div>
+  ${act.map(alertCard).join('') || '<div class="empty small">Aucune alerte active. Créez une alerte de niveau ou suivez un trade avec ses niveaux d’entrée, de SL et de TP.</div>'}
+
+  ${done.length ? `<div class="section-title"><h2>Terminées</h2></div>${done.slice(0, 20).map(alertCard).join('')}` : ''}
+
+  <div class="section-title"><h2>Historique des notifications</h2>${AL.log.length ? '<button class="link" data-act="clearLog">Effacer</button>' : ''}</div>
+  <div class="card" style="padding:4px 14px">${AL.log.slice(0, 50).map(n => `<div class="list-item" style="cursor:default"><div class="txt"><b>${esc(n.title)}</b><small>${esc(n.body)}<br>${new Date(n.at).toLocaleString('fr-FR')}</small></div></div>`).join('') || '<div class="empty small">Aucune notification pour l’instant.</div>'}</div>
+  <p class="disclaimer">Les cotations proviennent de flux publics (Kraken, Coinbase, Twelve Data) et peuvent différer de celles de votre broker (spread, horaires, instrument). Relevé toutes les 20 s (5 min pour Twelve Data) : un mouvement bref entre deux relevés peut ne pas être vu.</p>`;
+}, { tab: 'more' });
+
+screen('feedcfg', 'Flux de prix', () => {
+  const cfg = FEED.getFeedConfig();
+  return `
+  <div class="card"><h3>Sources sans clé</h3>
+    <div class="feat">BTC : Kraken (XBT/USD)</div>
+    <div class="feat">Or : Kraken PAXG/USD (jeton adossé à l’or, proche du spot XAU), remplacé par XAU/USD si Twelve Data est connecté</div>
+    <div class="feat">EUR/USD, USD/JPY, USD/CAD : Coinbase (taux agrégés)</div></div>
+
+  <div class="card"><h3>Twelve Data (optionnel)</h3>
+    <p class="small muted" style="margin-top:0">Nécessaire pour le S&amp;P 500, le Nasdaq, le pétrole et le gaz naturel. Clé gratuite sur <a href="https://twelvedata.com/" target="_blank" rel="noopener">twelvedata.com</a> (800 requêtes/jour : relevé toutes les 5 min). L’offre gratuite ne couvre pas forcément les indices : le statut de chaque actif s’affiche ci-dessous.</p>
+    <label class="field"><span>Clé API Twelve Data</span><input class="input mono" id="tdKey" type="password" value="${esc(cfg.tdKey)}" autocomplete="off" spellcheck="false"></label>
+    ${Object.entries(cfg.tdSymbols).map(([id, sym]) => `<label class="field"><span>Symbole pour ${id}</span><input class="input mono" data-sym="${id}" value="${esc(sym)}"></label>`).join('')}
+    <div class="grid-2"><button class="btn primary" data-act="saveFeed">Enregistrer</button>${cfg.tdKey ? '<button class="btn danger" data-act="removeFeedKey">Retirer la clé</button>' : ''}</div></div>
+
+  <div class="section-title"><h2>État</h2></div>
+  <div class="card">${D.ASSETS.map(a => `<div class="row between" style="padding:5px 0"><b class="small" style="width:64px">${a.id}</b><span class="small" style="flex:1;text-align:right" data-status="${a.id}">${feedLine(a.id)}</span></div>`).join('')}</div>`;
+}, {
+  tab: 'more',
+  mount() {
+    ACTIONS.saveFeed = () => {
+      const tdSymbols = {}; document.querySelectorAll('[data-sym]').forEach(i => { tdSymbols[i.dataset.sym] = i.value.trim(); });
+      FEED.saveFeedConfig({ tdKey: $('#tdKey').value.trim(), tdSymbols }); FEED.restartTwelve(); toast('Flux enregistré, connexion en cours…'); render();
+    };
+    ACTIONS.removeFeedKey = () => { FEED.saveFeedConfig({ tdKey: '' }); FEED.restartTwelve(); toast('Clé retirée.'); render(); };
+  },
+});
+
+const num = v => { const n = parseFloat(String(v).replace(/\s/g, '').replace(',', '.')); return isFinite(n) ? n : null; };
+const assetOptions = sel => D.ASSETS.map(a => `<option value="${a.id}" ${a.id === sel ? 'selected' : ''}>${a.id} · ${esc(a.name)}</option>`).join('');
+
+function levelSheet(asset = state.favorites[0] || 'GOLD') {
+  const cur = FEED.quotes[asset]?.price;
+  sheet(`<h2 style="margin-top:0">Alerte de niveau</h2>
+    <label class="field"><span>Actif</span><select class="input" id="aAsset">${assetOptions(asset)}</select></label>
+    <div class="small muted" id="aCur" style="margin:-6px 0 10px">${cur ? 'Prix actuel : ' + fmtP(asset, cur) : 'Pas de cotation réelle pour le moment'}</div>
+    <label class="field"><span>Niveau de prix</span><input class="input mono" id="aLevel" inputmode="decimal" placeholder="ex. ${cur ? fmtP(asset, cur) : ''}"></label>
+    <label class="field"><span>Prévenir aussi à l’approche (%, facultatif)</span><input class="input mono" id="aProx" inputmode="decimal" placeholder="ex. 0,2"></label>
+    <label class="field"><span>Note</span><input class="input" id="aNote" placeholder="ex. résistance hebdo"></label>
+    <button class="btn primary block" data-act="saveLevel">Créer l’alerte</button>`);
+  $('#aAsset').onchange = e => { const c = FEED.quotes[e.target.value]?.price; $('#aCur').textContent = c ? 'Prix actuel : ' + fmtP(e.target.value, c) : 'Pas de cotation réelle pour le moment'; };
+}
+
+function tradeSheet(asset = state.favorites[0] || 'GOLD', side = 'long', edit = null) {
+  const t = edit, cur = FEED.quotes[asset]?.price;
+  const v = x => x != null ? String(x) : '';
+  sheet(`<h2 style="margin-top:0">${t ? 'Modifier le trade' : 'Suivre un trade'}</h2>
+    <p class="small muted" style="margin-top:-6px">Saisissez les niveaux de votre broker. Vous serez notifié à l’entrée, au SL, aux TP et à l’approche des niveaux.</p>
+    <label class="field"><span>Actif</span><select class="input" id="tAsset" ${t ? 'disabled' : ''}>${assetOptions(asset)}</select></label>
+    <div class="small muted" id="tCur" style="margin:-6px 0 10px">${cur ? 'Prix actuel : ' + fmtP(asset, cur) : 'Pas de cotation réelle pour le moment'}</div>
+    <div class="seg" style="margin-bottom:12px"><button type="button" class="${side === 'long' ? 'on' : ''}" data-act="tSide" data-s="long">Achat (long)</button><button type="button" class="${side === 'short' ? 'on' : ''}" data-act="tSide" data-s="short">Vente (short)</button></div>
+    ${t ? '' : `<label class="check"><input type="checkbox" id="tOpen"> Je suis déjà en position (pas d’attente d’entrée)</label>`}
+    <div class="grid-2"><label class="field"><span>Entrée</span><input class="input mono" id="tEntry" inputmode="decimal" value="${v(t?.entry)}" ${t?.status === 'open' ? 'disabled' : ''}></label>
+      <label class="field"><span>Stop-loss</span><input class="input mono" id="tSl" inputmode="decimal" value="${v(t?.sl)}"></label>
+      <label class="field"><span>TP1</span><input class="input mono" id="tTp1" inputmode="decimal" value="${v(t?.tp1)}" ${t?.tp1Hit ? 'disabled' : ''}></label>
+      <label class="field"><span>TP2 (facultatif)</span><input class="input mono" id="tTp2" inputmode="decimal" value="${v(t?.tp2)}"></label></div>
+    <label class="field"><span>Alerte d’approche du SL / TP (%, facultatif)</span><input class="input mono" id="tProx" inputmode="decimal" value="${v(t?.proximity || '')}" placeholder="ex. 0,15"></label>
+    <label class="check"><input type="checkbox" id="tBe" ${t ? (t.beAfterTp1 ? 'checked' : '') : 'checked'}> Après le TP1, suggérer de remonter le SL au point d’entrée</label>
+    <label class="field"><span>Note</span><input class="input" id="tNote" value="${esc(t?.note || '')}" placeholder="ex. cassure du range asiatique"></label>
+    <div id="tRR" class="small muted" style="margin-bottom:10px"></div>
+    <button class="btn primary block" data-act="saveTrade" ${t ? `data-edit="${t.id}"` : ''}>${t ? 'Enregistrer' : 'Suivre ce trade'}</button>`);
+  const sh = document.querySelector('.sheet'); sh.dataset.side = side;
+  const upd = () => {
+    const e = num($('#tEntry').value), sl = num($('#tSl').value), tp = num($('#tTp2').value) || num($('#tTp1').value);
+    $('#tRR').textContent = e && sl && tp && e !== sl ? `Risque/rendement : ${fmt(Math.abs(tp - e) / Math.abs(e - sl), 2)} · risque ${fmt(Math.abs(e - sl) / e * 100, 2)} %` : '';
+  };
+  sh.querySelectorAll('input').forEach(i => i.addEventListener('input', upd)); upd();
+  $('#tAsset').onchange = e => { const c = FEED.quotes[e.target.value]?.price; $('#tCur').textContent = c ? 'Prix actuel : ' + fmtP(e.target.value, c) : 'Pas de cotation réelle pour le moment'; };
+  $('#tOpen')?.addEventListener('change', e => { if (e.target.checked && !$('#tEntry').value) { const c = FEED.quotes[$('#tAsset').value]?.price; if (c) $('#tEntry').value = fmtP($('#tAsset').value, c).replace(/\s/g, ''); upd(); } });
+}
+
+Object.assign(ACTIONS, {
+  newLevel(el) { levelSheet(el.dataset.id); },
+  newTrade(el) { tradeSheet(el.dataset.id, el.dataset.dir === '-1' ? 'short' : 'long'); },
+  editTrade(el) { const t = AL.alerts.find(a => a.id === el.dataset.id); if (t) tradeSheet(t.asset, t.side, t); },
+  tSide(el) { document.querySelector('.sheet').dataset.side = el.dataset.s; document.querySelectorAll('[data-act=tSide]').forEach(b => b.classList.toggle('on', b === el)); },
+  saveLevel() {
+    const asset = $('#aAsset').value, level = num($('#aLevel').value), prox = num($('#aProx').value) || 0;
+    const cur = FEED.quotes[asset]?.price;
+    if (!level || level <= 0) return toast('Saisissez un niveau valide.');
+    if (!cur) return toast('Impossible : aucune cotation réelle pour cet actif (le sens de franchissement ne peut pas être déterminé).');
+    if (level === cur) return toast('Le niveau est égal au prix actuel.');
+    AL.addLevel({ asset, level, price: cur, note: $('#aNote').value.trim(), proximity: prox });
+    closeSheet(); toast(`Alerte créée : ${asset} ${level > cur ? '▲' : '▼'} ${fmtP(asset, level)}`); render();
+  },
+  saveTrade(el) {
+    const side = document.querySelector('.sheet').dataset.side;
+    const asset = $('#tAsset').value, cur = FEED.quotes[asset]?.price;
+    const lv = { side, entry: num($('#tEntry').value), sl: num($('#tSl').value), tp1: num($('#tTp1').value), tp2: num($('#tTp2').value) };
+    const err = AL.validateTrade(lv); if (err) return toast(err);
+    const extra = { proximity: num($('#tProx').value) || 0, beAfterTp1: $('#tBe').checked, note: $('#tNote').value.trim() };
+    if (el.dataset.edit) {
+      const t = AL.alerts.find(a => a.id === el.dataset.edit);
+      Object.assign(t, lv, extra, { near: {} }); if (t.slOriginal && lv.sl !== t.entry) delete t.slOriginal;
+      AL.saveAlerts(); closeSheet(); toast('Trade mis à jour.'); render(); return;
+    }
+    if (!cur) return toast('Impossible : aucune cotation réelle pour cet actif pour le moment.');
+    const open = $('#tOpen').checked;
+    if (open) {
+      const long = side === 'long';
+      if (long ? cur <= lv.sl || cur >= lv.tp1 : cur >= lv.sl || cur <= lv.tp1) return toast('Le prix actuel est déjà au-delà du SL ou du TP1.');
+    }
+    AL.addTrade({ asset, ...lv, price: cur, open, ...extra });
+    closeSheet(); toast(`Trade ${asset} suivi.`); render();
+  },
+  cancelAlert(el) { AL.cancel(el.dataset.id); render(); },
+  removeAlert(el) { AL.remove(el.dataset.id); render(); },
+  clearLog() { AL.clearLog(); render(); },
+  async enableNotif() {
+    try { const r = await Notification.requestPermission(); toast(r === 'granted' ? 'Notifications activées.' : 'Notifications refusées.'); } catch { toast('Notifications indisponibles.'); }
+    render();
+  },
+  testNotif() { notify({ title: '🔔 Test de notification', body: 'Les alertes de niveau, SL et TP s’afficheront ainsi.', level: 'info', alertId: 'test', at: Date.now() }); },
+});
 
 /* =========================================================================
    Démarrage
    ========================================================================= */
 render();
-setInterval(tickPrices, 4000);
+FEED.onQuotes(onQuotes);
+FEED.start();
 setInterval(pushSquawk, 25000);
+setInterval(() => document.querySelectorAll('[data-status]').forEach(el => { el.innerHTML = feedLine(el.dataset.status); }), 5000);
+navigator.serviceWorker?.addEventListener?.('message', e => { if (e.data?.go) go(e.data.go); });
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
